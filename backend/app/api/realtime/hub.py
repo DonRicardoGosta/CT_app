@@ -55,6 +55,8 @@ class RealtimeHub:
             log.info("realtime_hub_started")
         except Exception as exc:  # noqa: BLE001 - API still usable without Kafka
             log.warning("realtime_hub_kafka_unavailable", error=str(exc))
+            with contextlib.suppress(Exception):
+                await self._consumer.stop()
             self._consumer = None
 
     async def stop(self) -> None:
