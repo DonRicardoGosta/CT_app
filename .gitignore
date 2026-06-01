@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Project-specific overrides ---------------------------------------------
+# The Python "lib/" rule above (build artifacts) must NOT swallow frontend source.
+!frontend/src/lib/
+!frontend/src/lib/**
