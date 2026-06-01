@@ -30,7 +30,7 @@ def _resolve_symbols(
     if config.symbols:
         return [s for s in config.symbols if s in instruments] or config.symbols
     desired = strategy.desired_symbols(instruments)
-    return desired or list(instruments)[: config.risk and 5 or 5]
+    return desired or list(instruments)[:5]
 
 
 async def build_engine(
