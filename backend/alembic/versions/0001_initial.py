@@ -8,7 +8,6 @@ models and avoids hand-maintained DDL drift for the first revision.
 from __future__ import annotations
 
 from alembic import op
-
 from app.db import models  # noqa: F401 - register tables on the metadata
 from app.db.base import Base
 

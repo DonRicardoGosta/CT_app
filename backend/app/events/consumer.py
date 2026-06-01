@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from aiokafka import AIOKafkaConsumer
 
 from app.core.logging import get_logger
 from app.events.schemas import EVENT_MODELS, BaseEvent, EventType
@@ -54,7 +57,7 @@ class KafkaEventConsumer:
         self._bootstrap = bootstrap_servers
         self._group_id = group_id
         self._auto_offset_reset = auto_offset_reset
-        self._consumer = None  # type: ignore[assignment]
+        self._consumer: AIOKafkaConsumer | None = None
 
     async def start(self) -> None:
         from aiokafka import AIOKafkaConsumer

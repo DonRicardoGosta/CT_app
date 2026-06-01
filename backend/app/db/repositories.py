@@ -6,6 +6,7 @@ rows. Query helpers back the history/config REST APIs.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -133,7 +134,7 @@ def _error_row(e: ErrorEvent) -> dict[str, Any]:
     }
 
 
-_MODEL_BUILDERS = {
+_MODEL_BUILDERS: dict[EventType, tuple[type, Callable[[Any], dict[str, Any]]]] = {
     EventType.ORDER: (OrderRecord, _order_row),
     EventType.FILL: (FillRecord, _fill_row),
     EventType.POSITION: (PositionSnapshot, _position_row),
@@ -162,7 +163,7 @@ async def persist_events(session: AsyncSession, events: list[BaseEvent]) -> int:
         if builder is None:
             continue
         _, row_fn = builder
-        by_type.setdefault(etype, []).append(row_fn(event))  # type: ignore[arg-type]
+        by_type.setdefault(etype, []).append(row_fn(event))
 
     for etype, rows in by_type.items():
         if not rows:

@@ -27,8 +27,8 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 
 from app.domain.types import (
-    IntentAction,
     Instrument,
+    IntentAction,
     PositionSide,
     Side,
     TradeIntent,
@@ -124,7 +124,11 @@ class AutoscanLadderStrategy(Strategy):
         # 2) take profit on the desired side's aggregate position
         pos = context.account.position(symbol, desired)
         if pos is not None and pos.qty > 0:
-            upnl_pct = pos.unrealized_pnl(price) / pos.margin * Decimal(100) if pos.margin else Decimal(0)
+            upnl_pct = (
+                pos.unrealized_pnl(price) / pos.margin * Decimal(100)
+                if pos.margin
+                else Decimal(0)
+            )
             if upnl_pct >= self.p.take_profit_pct:
                 self._last_entry.pop((symbol, desired), None)
                 intents.append(

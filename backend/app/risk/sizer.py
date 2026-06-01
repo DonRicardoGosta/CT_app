@@ -21,8 +21,8 @@ from decimal import ROUND_DOWN, Decimal
 
 from app.domain.types import (
     AccountState,
-    IntentAction,
     Instrument,
+    IntentAction,
     OrderRequest,
     OrderType,
     PositionSide,

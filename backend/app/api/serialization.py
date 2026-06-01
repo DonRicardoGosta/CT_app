@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -27,5 +28,7 @@ def row_to_dict(obj: Base, *, exclude: set[str] | None = None) -> dict[str, Any]
     }
 
 
-def rows_to_list(objs: list[Base], *, exclude: set[str] | None = None) -> list[dict[str, Any]]:
+def rows_to_list(
+    objs: Sequence[Base], *, exclude: set[str] | None = None
+) -> list[dict[str, Any]]:
     return [row_to_dict(o, exclude=exclude) for o in objs]

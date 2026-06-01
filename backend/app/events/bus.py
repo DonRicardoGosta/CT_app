@@ -10,6 +10,7 @@ database can never stall trading because the DB is downstream of Kafka (REQ-004)
 from __future__ import annotations
 
 import abc
+from typing import TYPE_CHECKING
 
 from app.core.logging import get_logger
 from app.events.schemas import (
@@ -24,6 +25,9 @@ from app.events.schemas import (
     SignalEvent,
 )
 from app.events.topics import Topics, get_topics
+
+if TYPE_CHECKING:
+    from aiokafka import AIOKafkaProducer
 
 log = get_logger(__name__)
 
@@ -110,7 +114,7 @@ class KafkaSink(EventSink):
     def __init__(self, bootstrap_servers: str, topics: Topics | None = None) -> None:
         self._bootstrap = bootstrap_servers
         self._topics = topics or get_topics()
-        self._producer = None  # type: ignore[assignment]
+        self._producer: AIOKafkaProducer | None = None
 
     async def start(self) -> None:
         from aiokafka import AIOKafkaProducer

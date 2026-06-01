@@ -11,10 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 
 
-class Mode(str, Enum):
+class Mode(StrEnum):
     """Execution mode. Selects which collaborators are injected, nothing else."""
 
     LIVE = "live"
@@ -22,7 +22,7 @@ class Mode(str, Enum):
     BACKTEST = "backtest"
 
 
-class Side(str, Enum):
+class Side(StrEnum):
     """Order side."""
 
     BUY = "buy"
@@ -34,7 +34,7 @@ class Side(str, Enum):
         return 1 if self is Side.BUY else -1
 
 
-class PositionSide(str, Enum):
+class PositionSide(StrEnum):
     """Position direction for hedge-mode accounts."""
 
     LONG = "long"
@@ -49,12 +49,12 @@ class PositionSide(str, Enum):
         return cls.LONG if side is Side.BUY else cls.SHORT
 
 
-class OrderType(str, Enum):
+class OrderType(StrEnum):
     MARKET = "market"
     LIMIT = "limit"
 
 
-class OrderStatus(str, Enum):
+class OrderStatus(StrEnum):
     NEW = "new"
     PARTIALLY_FILLED = "partially_filled"
     FILLED = "filled"
@@ -62,7 +62,7 @@ class OrderStatus(str, Enum):
     REJECTED = "rejected"
 
 
-class IntentAction(str, Enum):
+class IntentAction(StrEnum):
     """High-level trade intent a strategy can emit (sizing is done by risk, REQ-007)."""
 
     OPEN = "open"
@@ -113,7 +113,7 @@ class Tick:
     ts: datetime
 
 
-class MarketEventType(str, Enum):
+class MarketEventType(StrEnum):
     BAR = "bar"
     TICK = "tick"
 

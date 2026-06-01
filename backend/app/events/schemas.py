@@ -8,13 +8,13 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     ORDER = "order"
     FILL = "fill"
     POSITION = "position"

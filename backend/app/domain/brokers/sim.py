@@ -149,10 +149,11 @@ class SimBroker(Broker):
                 * Decimal(pos.position_side.sign)
             )
             # Release committed margin proportionally.
-            if pos.qty > 0:
-                released = pos.committed_margin * (close_qty / pos.qty)
-            else:
-                released = Decimal("0")
+            released = (
+                pos.committed_margin * (close_qty / pos.qty)
+                if pos.qty > 0
+                else Decimal("0")
+            )
             pos.qty -= close_qty
             pos.committed_margin -= released
             pos.realized_pnl += realized

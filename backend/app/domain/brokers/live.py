@@ -127,8 +127,11 @@ class LiveBroker(Broker):
             if qty == 0:
                 return None
             side_raw = str(item.get("side") or item.get("positionSide") or "LONG").upper()
-            side = PositionSide.LONG if "LONG" in side_raw or "BUY" in side_raw else PositionSide.SHORT
-            entry = _dec(item.get("entryValue") or item.get("avgOpenPrice") or item.get("entryPrice"))
+            is_long = "LONG" in side_raw or "BUY" in side_raw
+            side = PositionSide.LONG if is_long else PositionSide.SHORT
+            entry = _dec(
+                item.get("entryValue") or item.get("avgOpenPrice") or item.get("entryPrice")
+            )
             leverage = int(_dec(item.get("leverage"), "1"))
             return Position(
                 symbol=str(item.get("symbol")),
