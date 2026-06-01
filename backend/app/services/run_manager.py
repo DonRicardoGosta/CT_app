@@ -14,7 +14,8 @@ from datetime import UTC, datetime
 from app.core.logging import get_logger
 from app.domain.engine import Engine
 from app.events.bus import EventSink
-from app.services.builder import build_engine
+from app.events.schemas import ErrorEvent
+from app.services.builder import BuildError, build_engine
 from app.services.run_config import RunConfig
 
 log = get_logger(__name__)
@@ -41,15 +42,24 @@ class RunManager:
     ) -> str:
         if config.run_id in self._runs:
             return config.run_id
-        engine = await build_engine(
-            config, self._sink, api_key=api_key, secret_key=secret_key
-        )
+        try:
+            engine = await build_engine(
+                config, self._sink, api_key=api_key, secret_key=secret_key
+            )
+        except BuildError as exc:
+            detail = str(exc.details) if exc.details else ""
+            await self._emit_worker_error(config, f"{exc} {detail}".strip())
+            raise
+        except Exception as exc:  # noqa: BLE001
+            await self._emit_worker_error(config, f"Failed to build engine: {exc}")
+            raise
         task = asyncio.create_task(self._supervise(config.run_id, engine))
         self._runs[config.run_id] = RunHandle(config=config, engine=engine, task=task)
         log.info("run_started", run_id=config.run_id, mode=str(config.mode))
         return config.run_id
 
     async def _supervise(self, run_id: str, engine: Engine) -> None:
+        handle = self._runs.get(run_id)
         try:
             await engine.run()
             self._set_status(run_id, "finished")
@@ -59,6 +69,20 @@ class RunManager:
         except Exception as exc:  # noqa: BLE001
             self._set_status(run_id, "failed")
             log.error("run_failed", run_id=run_id, error=str(exc))
+            if handle is not None:
+                await self._emit_worker_error(handle.config, f"Run failed: {exc}")
+
+    async def _emit_worker_error(self, config: RunConfig, message: str) -> None:
+        await self._sink.emit(
+            ErrorEvent(
+                run_id=config.run_id,
+                mode=str(config.mode),
+                ts=datetime.now(UTC),
+                source="trading-worker",
+                severity="error",
+                message=message,
+            )
+        )
 
     def stop(self, run_id: str) -> bool:
         handle = self._runs.get(run_id)

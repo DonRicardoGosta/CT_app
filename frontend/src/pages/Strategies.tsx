@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { endpoints } from "@/lib/api";
 import SchemaForm, { defaultsFromSchema, type FormValue } from "@/components/SchemaForm";
+import StrategyPlanView from "@/components/StrategyPlanView";
 import { Badge, Button, Card, CardTitle, Field, Input, Select } from "@/components/ui";
 
 const MODES = ["dry_run", "live", "backtest"];
@@ -66,7 +67,9 @@ export default function Strategies() {
   }
 
   return (
-    <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
+    <div className="space-y-5">
+      <StrategyPlanView />
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
       <Card className="lg:col-span-2">
         <CardTitle right={<Badge tone="accent">{names.length} available</Badge>}>
           Configure & launch
@@ -194,6 +197,7 @@ export default function Strategies() {
           multiplier is increased automatically up to the max.
         </p>
       </Card>
+    </div>
     </div>
   );
 }

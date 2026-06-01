@@ -23,6 +23,17 @@ from app.strategies import create_strategy
 
 log = get_logger(__name__)
 
+# Used when Bitunix trading_pairs is unreachable or returns nothing.
+DEFAULT_BACKTEST_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
+
+
+class BuildError(RuntimeError):
+    """Engine assembly failed before the run loop."""
+
+    def __init__(self, message: str, *, details: dict | None = None) -> None:
+        super().__init__(message)
+        self.details = details or {}
+
 
 def _resolve_symbols(
     config: RunConfig, strategy, instruments: dict[str, Instrument]
@@ -30,7 +41,11 @@ def _resolve_symbols(
     if config.symbols:
         return [s for s in config.symbols if s in instruments] or config.symbols
     desired = strategy.desired_symbols(instruments)
-    return desired or list(instruments)[:5]
+    if desired:
+        return desired
+    if instruments:
+        return list(instruments)[:5]
+    return DEFAULT_BACKTEST_SYMBOLS[:5]
 
 
 async def build_engine(
@@ -59,15 +74,44 @@ async def build_engine(
     broker: Broker
 
     if mode is Mode.BACKTEST:
-        per_symbol = {}
+        per_symbol: dict[str, list] = {}
+        fetch_errors: dict[str, str] = {}
         for sym in symbols:
             try:
-                per_symbol[sym] = await rest.get_klines(
-                    sym, config.interval, config.backtest_limit
-                )
+                if config.backtest_start or config.backtest_end:
+                    per_symbol[sym] = await rest.get_klines(
+                        sym,
+                        config.interval,
+                        start_time=config.backtest_start,
+                        end_time=config.backtest_end,
+                    )
+                else:
+                    per_symbol[sym] = await rest.get_klines(
+                        sym, config.interval, config.backtest_limit
+                    )
             except Exception as exc:  # noqa: BLE001
+                fetch_errors[sym] = str(exc)
                 log.warning("kline_fetch_failed", symbol=sym, error=str(exc))
         bars = merge_bars_by_time(per_symbol)
+        if not bars:
+            log.warning(
+                "backtest_no_bars",
+                symbols=symbols,
+                start=str(config.backtest_start),
+                end=str(config.backtest_end),
+                fetch_errors=fetch_errors,
+            )
+            raise BuildError(
+                "No historical bars loaded for backtest",
+                details={
+                    "symbols": symbols,
+                    "interval": config.interval,
+                    "backtest_start": str(config.backtest_start),
+                    "backtest_end": str(config.backtest_end),
+                    "fetch_errors": fetch_errors,
+                    "hint": "Check date range, symbols, and that trading-worker can reach fapi.bitunix.com",
+                },
+            )
         start = bars[0].open_time if bars else config.backtest_start
         sim_clock = SimulatedClock(start) if start else SimulatedClock(_epoch())
         clock = sim_clock

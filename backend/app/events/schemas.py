@@ -23,6 +23,7 @@ class EventType(StrEnum):
     ERROR = "error"
     MARKET = "market"
     RUN = "run"
+    STRATEGY_PLAN = "strategy_plan"
 
 
 class BaseEvent(BaseModel):
@@ -90,6 +91,11 @@ class SignalEvent(BaseEvent):
     weight: Decimal
     reason: str = ""
     tag: str = ""
+    position_side: str = ""
+    mark_price: Decimal | None = None
+    stop_price: Decimal | None = None
+    take_profit_price: Decimal | None = None
+    leverage: int = 1
 
 
 class EquityEvent(BaseEvent):
@@ -117,6 +123,18 @@ class RunEvent(BaseEvent):
     detail: str = ""
 
 
+class StrategyPlanEvent(BaseEvent):
+    """Multi-coin trading plan for the UI (selected symbols, TP/SL, ladder, charts)."""
+
+    type: Literal[EventType.STRATEGY_PLAN] = EventType.STRATEGY_PLAN
+    strategy: str
+    selected_symbols: list[str] = Field(default_factory=list)
+    leverage: int = 1
+    stop_loss_pct_margin: str = ""
+    take_profit_pct_margin: str = ""
+    coins: list[dict[str, Any]] = Field(default_factory=list)
+
+
 # Mapping used by the consumer to route a topic's payload back to a model.
 EVENT_MODELS: dict[EventType, type[BaseEvent]] = {
     EventType.ORDER: OrderEvent,
@@ -126,4 +144,5 @@ EVENT_MODELS: dict[EventType, type[BaseEvent]] = {
     EventType.EQUITY: EquityEvent,
     EventType.ERROR: ErrorEvent,
     EventType.RUN: RunEvent,
+    EventType.STRATEGY_PLAN: StrategyPlanEvent,
 }
