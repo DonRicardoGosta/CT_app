@@ -17,6 +17,7 @@ class Topics:
         self.errors = f"{prefix}.errors"
         self.market = f"{prefix}.market"
         self.runs = f"{prefix}.runs"
+        self.strategy_plan = f"{prefix}.strategy_plan"
         # Control commands (start/stop a run) sent from the API to the worker.
         self.control = f"{prefix}.control"
 
@@ -42,6 +43,7 @@ class Topics:
             self.equity,
             self.errors,
             self.runs,
+            self.strategy_plan,
         ]
 
 

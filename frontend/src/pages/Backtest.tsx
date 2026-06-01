@@ -1,4 +1,4 @@
-// Backtest launcher + results (DB-backed results after the run completes).
+// Backtest launcher + results (date range, leverage, TP/SL on margin).
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { endpoints } from "@/lib/api";
@@ -7,16 +7,26 @@ import EquityChart from "@/components/EquityChart";
 import { Badge, Button, Card, CardTitle, Empty, Field, Input, Select, Table, Td, Tr } from "@/components/ui";
 import { num, pnlClass, time, usd } from "@/lib/format";
 
+function toIsoDate(d: string, endOfDay: boolean): string | undefined {
+  if (!d) return undefined;
+  const suffix = endOfDay ? "T23:59:59" : "T00:00:00";
+  return new Date(`${d}${suffix}`).toISOString();
+}
+
 export default function Backtest() {
   const { data: schemas } = useQuery({ queryKey: ["strategies"], queryFn: endpoints.strategies });
   const names = useMemo(() => Object.keys(schemas ?? {}), [schemas]);
 
   const [strategy, setStrategy] = useState("");
   const [params, setParams] = useState<FormValue>({});
-  const [symbols, setSymbols] = useState("BTCUSDT");
+  const [symbols, setSymbols] = useState("");
   const [interval, setInterval] = useState("1m");
   const [capital, setCapital] = useState("1000");
-  const [limit, setLimit] = useState("1000");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [leverage, setLeverage] = useState("10");
+  const [minInvest, setMinInvest] = useState("1");
+  const [maxCapital, setMaxCapital] = useState("100");
   const [runId, setRunId] = useState<string>("");
   const [msg, setMsg] = useState("");
 
@@ -40,19 +50,34 @@ export default function Backtest() {
 
   async function run() {
     setMsg("");
+    if (!fromDate || !toDate) {
+      setMsg("Please set both From date and To date.");
+      return;
+    }
     try {
       const res = await endpoints.startRun({
         mode: "backtest",
         strategy,
         params,
-        symbols: symbols.split(",").map((s) => s.trim()).filter(Boolean),
+        symbols: symbols
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
         interval,
         initial_capital: capital,
-        backtest_limit: Number(limit),
-        risk: { min_investment_usd: "1", max_capital_usd: "100", base_leverage: 5, max_leverage: 20 },
+        backtest_start: toIsoDate(fromDate, false),
+        backtest_end: toIsoDate(toDate, true),
+        risk: {
+          min_investment_usd: minInvest,
+          max_capital_usd: maxCapital,
+          max_loss_usd: maxCapital,
+          base_leverage: Number(leverage),
+          max_leverage: Number(leverage),
+          leverage_step: 1,
+        },
       });
       setRunId(res.run_id);
-      setMsg(`Backtest ${res.run_id} started — results stream in below.`);
+      setMsg(`Backtest ${res.run_id} started (${fromDate} → ${toDate}, ${leverage}x).`);
     } catch (e) {
       setMsg(`Error: ${String(e)}`);
     }
@@ -68,7 +93,7 @@ export default function Backtest() {
     <div className="space-y-5">
       <Card>
         <CardTitle right={<Badge tone="accent">backtest</Badge>}>Configure backtest</CardTitle>
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <Field label="Strategy">
             <Select
               value={strategy}
@@ -82,8 +107,12 @@ export default function Backtest() {
               ))}
             </Select>
           </Field>
-          <Field label="Symbols">
-            <Input value={symbols} onChange={(e) => setSymbols(e.target.value)} />
+          <Field label="Symbols (empty = auto up to 5)">
+            <Input
+              placeholder="BTCUSDT, ETHUSDT"
+              value={symbols}
+              onChange={(e) => setSymbols(e.target.value)}
+            />
           </Field>
           <Field label="Interval">
             <Select value={interval} onChange={(e) => setInterval(e.target.value)}>
@@ -92,13 +121,29 @@ export default function Backtest() {
               ))}
             </Select>
           </Field>
-          <Field label="Initial capital">
+          <Field label="Initial capital (USD)">
             <Input type="number" value={capital} onChange={(e) => setCapital(e.target.value)} />
           </Field>
-          <Field label="Bars (limit)">
-            <Input type="number" value={limit} onChange={(e) => setLimit(e.target.value)} />
+          <Field label="From date">
+            <Input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
+          </Field>
+          <Field label="To date">
+            <Input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} />
+          </Field>
+          <Field label="Leverage (x)">
+            <Input type="number" value={leverage} onChange={(e) => setLeverage(e.target.value)} />
+          </Field>
+          <Field label="Min investment / step (USD)">
+            <Input type="number" value={minInvest} onChange={(e) => setMinInvest(e.target.value)} />
+          </Field>
+          <Field label="Max capital (USD)">
+            <Input type="number" value={maxCapital} onChange={(e) => setMaxCapital(e.target.value)} />
           </Field>
         </div>
+        <p className="mt-2 text-xs text-muted">
+          TP/SL % in strategy params are on margin (ROE). Price levels use leverage: e.g. 2% SL at 10x ≈
+          0.2% price move.
+        </p>
         <div className="mt-3">
           {strategy && schemas?.[strategy] && (
             <SchemaForm schema={schemas[strategy]} value={params} onChange={setParams} />

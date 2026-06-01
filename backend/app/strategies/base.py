@@ -31,6 +31,8 @@ class StrategyContext:
     account: AccountState
     instruments: dict[str, Instrument]
     market: MarketState
+    #: Base leverage from risk config (for TP/SL price level math).
+    leverage: int = 1
 
 
 class Strategy(abc.ABC):
@@ -62,6 +64,17 @@ class Strategy(abc.ABC):
 
     async def on_start(self, context: StrategyContext) -> None:
         """Optional hook before the first event."""
+        return None
+
+    def selected_symbols(self) -> list[str]:
+        """Coins currently selected for trading (empty if not applicable)."""
+        return []
+
+    def plan_snapshot(self, context: StrategyContext, leverage: int) -> dict | None:
+        """Optional multi-coin plan for the UI (TP/SL, ladder, charts).
+
+        Return ``None`` if this strategy does not expose a plan.
+        """
         return None
 
     @abc.abstractmethod

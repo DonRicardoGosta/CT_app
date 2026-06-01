@@ -18,7 +18,16 @@ async def realtime_ws(websocket: WebSocket) -> None:
     """
     hub: RealtimeHub = websocket.app.state.hub
     client = await hub.connect(websocket)
-    channels = ["order", "fill", "position", "signal", "equity", "error", "run"]
+    channels = [
+        "order",
+        "fill",
+        "position",
+        "signal",
+        "equity",
+        "error",
+        "run",
+        "strategy_plan",
+    ]
     try:
         await websocket.send_json({"type": "hello", "channels": channels})
         while True:

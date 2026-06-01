@@ -33,6 +33,8 @@ from app.domain.types import (
     OrderStatus,
 )
 from app.events.bus import EventSink
+from app.domain.tp_sl import take_profit_price as calc_tp_price
+from app.domain.tp_sl import stop_loss_price as calc_sl_price
 from app.events.schemas import (
     EquityEvent,
     ErrorEvent,
@@ -41,6 +43,7 @@ from app.events.schemas import (
     PositionEvent,
     RunEvent,
     SignalEvent,
+    StrategyPlanEvent,
 )
 from app.risk.sizer import RiskSizer
 from app.strategies.base import Strategy, StrategyContext
@@ -121,14 +124,24 @@ class Engine:
     # ------------------------------------------------------------------ #
     async def _on_start(self, event: MarketEvent, instruments: dict[str, Instrument]) -> None:
         account = await self.broker.account()
-        ctx = StrategyContext(
+        ctx = self._make_context(event, account, instruments)
+        await self.strategy.on_start(ctx)
+        await self._emit_plan(ctx)
+
+    def _make_context(
+        self,
+        event: MarketEvent,
+        account: AccountState,
+        instruments: dict[str, Instrument],
+    ) -> StrategyContext:
+        return StrategyContext(
             event=event,
             now=self.clock.now(),
             account=account,
             instruments=instruments,
             market=self.market,
+            leverage=self.sizer.params.base_leverage,
         )
-        await self.strategy.on_start(ctx)
 
     async def _handle_event(
         self,
@@ -147,18 +160,14 @@ class Engine:
 
         # 2) strategy decision (pure)
         account = await self.broker.account()
-        ctx = StrategyContext(
-            event=event,
-            now=self.clock.now(),
-            account=account,
-            instruments=instruments,
-            market=self.market,
-        )
+        ctx = self._make_context(event, account, instruments)
         intents = self.strategy.on_event(ctx)
 
         # 3-4) size + submit each intent
         for intent in intents:
-            await self._emit_signal(intent)
+            price = self.market.last_price(intent.symbol)
+            lev = self.sizer.params.base_leverage
+            await self._emit_signal(intent, price=price, leverage=lev)
             instrument = instruments.get(intent.symbol)
             if instrument is None:
                 await self._emit_error("sizer", f"unknown instrument {intent.symbol}")
@@ -181,8 +190,10 @@ class Engine:
                     await self._emit_fill(fill)
                 await self._emit_positions_for(order.symbol)
 
-        # 5) equity snapshot
+        # 5) equity snapshot + trading plan for UI
         await self._emit_equity()
+        if event.type is MarketEventType.BAR:
+            await self._emit_plan(ctx)
 
     async def _finalize(self, summary: EngineSummary) -> None:
         account = await self.broker.account()
@@ -208,7 +219,15 @@ class Engine:
             )
         )
 
-    async def _emit_signal(self, intent) -> None:
+    async def _emit_signal(self, intent, *, price=None, leverage: int = 1) -> None:
+        mark = price
+        sl = intent.stop_price
+        tp = None
+        if mark is not None and hasattr(self.strategy, "p"):
+            p = self.strategy.p  # type: ignore[attr-defined]
+            tp = calc_tp_price(mark, intent.position_side, p.take_profit_pct, leverage)
+            if sl is None:
+                sl = calc_sl_price(mark, intent.position_side, p.stop_loss_pct, leverage)
         await self.sink.emit(
             SignalEvent(
                 run_id=self.run_id,
@@ -221,6 +240,29 @@ class Engine:
                 weight=intent.weight,
                 reason=intent.reason,
                 tag=intent.tag,
+                position_side=intent.position_side.value,
+                mark_price=mark,
+                stop_price=sl,
+                take_profit_price=tp,
+                leverage=leverage,
+            )
+        )
+
+    async def _emit_plan(self, ctx: StrategyContext) -> None:
+        plan = self.strategy.plan_snapshot(ctx, self.sizer.params.base_leverage)
+        if not plan:
+            return
+        await self.sink.emit(
+            StrategyPlanEvent(
+                run_id=self.run_id,
+                mode=self.mode.value,
+                ts=self.clock.now(),
+                strategy=self.strategy.name,
+                selected_symbols=plan.get("selected_symbols", []),
+                leverage=int(plan.get("leverage", 1)),
+                stop_loss_pct_margin=str(plan.get("stop_loss_pct_margin", "")),
+                take_profit_pct_margin=str(plan.get("take_profit_pct_margin", "")),
+                coins=plan.get("coins", []),
             )
         )
 

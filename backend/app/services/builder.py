@@ -62,9 +62,17 @@ async def build_engine(
         per_symbol = {}
         for sym in symbols:
             try:
-                per_symbol[sym] = await rest.get_klines(
-                    sym, config.interval, config.backtest_limit
-                )
+                if config.backtest_start or config.backtest_end:
+                    per_symbol[sym] = await rest.get_klines(
+                        sym,
+                        config.interval,
+                        start_time=config.backtest_start,
+                        end_time=config.backtest_end,
+                    )
+                else:
+                    per_symbol[sym] = await rest.get_klines(
+                        sym, config.interval, config.backtest_limit
+                    )
             except Exception as exc:  # noqa: BLE001
                 log.warning("kline_fetch_failed", symbol=sym, error=str(exc))
         bars = merge_bars_by_time(per_symbol)

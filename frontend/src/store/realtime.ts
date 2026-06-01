@@ -7,6 +7,34 @@ import { realtime, type RealtimeEvent, type Status } from "@/lib/ws";
 const MAX_FEED = 200;
 const MAX_CURVE = 1000;
 
+export interface CoinPlanRow {
+  symbol: string;
+  price: string;
+  trend: string;
+  direction: string;
+  leverage: number;
+  stop_loss_price: string;
+  take_profit_price: string;
+  stop_loss_pct_margin: string;
+  take_profit_pct_margin: string;
+  ladder_step: number;
+  ladder_max: number;
+  open_status: string;
+  next_open_price: string;
+  next_open_reason: string;
+  position_qty: string;
+  entry_price: string;
+  bars: unknown[];
+}
+
+export interface StrategyPlanState {
+  selected_symbols: string[];
+  leverage: number;
+  stop_loss_pct_margin: string;
+  take_profit_pct_margin: string;
+  coins: CoinPlanRow[];
+}
+
 export interface PositionRow {
   symbol: string;
   position_side: string;
@@ -31,6 +59,7 @@ interface RealtimeState {
   signals: RealtimeEvent[];
   errors: RealtimeEvent[];
   runs: RealtimeEvent[];
+  strategyPlan: StrategyPlanState | null;
   setStatus: (s: Status) => void;
   ingest: (e: RealtimeEvent) => void;
   reset: () => void;
@@ -50,9 +79,20 @@ export const useRealtime = create<RealtimeState>((set) => ({
   signals: [],
   errors: [],
   runs: [],
+  strategyPlan: null,
   setStatus: (s) => set({ status: s }),
   reset: () =>
-    set({ positions: {}, equity: null, equityCurve: [], fills: [], orders: [], signals: [], errors: [], runs: [] }),
+    set({
+      positions: {},
+      equity: null,
+      equityCurve: [],
+      fills: [],
+      orders: [],
+      signals: [],
+      errors: [],
+      runs: [],
+      strategyPlan: null,
+    }),
   ingest: (e) =>
     set((state) => {
       switch (e.type) {
@@ -79,6 +119,16 @@ export const useRealtime = create<RealtimeState>((set) => ({
           return { errors: prepend(state.errors, e) };
         case "run":
           return { runs: prepend(state.runs, e) };
+        case "strategy_plan":
+          return {
+            strategyPlan: {
+              selected_symbols: (e.selected_symbols as string[]) ?? [],
+              leverage: Number(e.leverage ?? 1),
+              stop_loss_pct_margin: String(e.stop_loss_pct_margin ?? ""),
+              take_profit_pct_margin: String(e.take_profit_pct_margin ?? ""),
+              coins: (e.coins as CoinPlanRow[]) ?? [],
+            },
+          };
         default:
           return {};
       }
@@ -94,5 +144,14 @@ export function initRealtime() {
   realtime.onStatus((s) => useRealtime.getState().setStatus(s));
   realtime.onEvent((e) => useRealtime.getState().ingest(e));
   realtime.connect();
-  realtime.subscribe(["order", "fill", "position", "signal", "equity", "error", "run"]);
+  realtime.subscribe([
+    "order",
+    "fill",
+    "position",
+    "signal",
+    "equity",
+    "error",
+    "run",
+    "strategy_plan",
+  ]);
 }
