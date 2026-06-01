@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.config.router import router as config_router
 from app.api.control.router import router as control_router
 from app.api.history.router import router as history_router
+from app.api.system.router import router as system_router
 from app.api.realtime.hub import RealtimeHub
 from app.api.realtime.router import router as realtime_router
 from app.core.config import get_settings
@@ -73,6 +74,7 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(history_router, prefix="/api")
+    app.include_router(system_router, prefix="/api")
     app.include_router(config_router, prefix="/api")
     app.include_router(control_router, prefix="/api")
     app.include_router(realtime_router, prefix="/api/realtime")

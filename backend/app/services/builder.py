@@ -76,6 +76,13 @@ async def build_engine(
             except Exception as exc:  # noqa: BLE001
                 log.warning("kline_fetch_failed", symbol=sym, error=str(exc))
         bars = merge_bars_by_time(per_symbol)
+        if not bars:
+            log.warning(
+                "backtest_no_bars",
+                symbols=symbols,
+                start=str(config.backtest_start),
+                end=str(config.backtest_end),
+            )
         start = bars[0].open_time if bars else config.backtest_start
         sim_clock = SimulatedClock(start) if start else SimulatedClock(_epoch())
         clock = sim_clock

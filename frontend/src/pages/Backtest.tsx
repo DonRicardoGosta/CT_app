@@ -4,6 +4,8 @@ import { useQuery } from "@tanstack/react-query";
 import { endpoints } from "@/lib/api";
 import SchemaForm, { defaultsFromSchema, type FormValue } from "@/components/SchemaForm";
 import EquityChart from "@/components/EquityChart";
+import RunStatusPanel from "@/components/RunStatusPanel";
+import { useRunMonitor } from "@/hooks/useRunMonitor";
 import { Badge, Button, Card, CardTitle, Empty, Field, Input, Select, Table, Td, Tr } from "@/components/ui";
 import { num, pnlClass, time, usd } from "@/lib/format";
 
@@ -30,6 +32,8 @@ export default function Backtest() {
   const [runId, setRunId] = useState<string>("");
   const [msg, setMsg] = useState("");
 
+  const { status, runEquity } = useRunMonitor(runId || null);
+
   if (!strategy && names.length) {
     setStrategy(names[0]);
     setParams(defaultsFromSchema(schemas![names[0]]));
@@ -39,13 +43,13 @@ export default function Backtest() {
     queryKey: ["equity", runId],
     queryFn: () => endpoints.equity(runId),
     enabled: !!runId,
-    refetchInterval: 3000,
+    refetchInterval: status === "finished" || status === "failed" ? 4000 : 1500,
   });
   const fills = useQuery({
     queryKey: ["fills", runId],
     queryFn: () => endpoints.fills(runId),
     enabled: !!runId,
-    refetchInterval: 3000,
+    refetchInterval: status === "finished" || status === "failed" ? 4000 : 1500,
   });
 
   async function run() {
@@ -77,17 +81,26 @@ export default function Backtest() {
         },
       });
       setRunId(res.run_id);
-      setMsg(`Backtest ${res.run_id} started (${fromDate} → ${toDate}, ${leverage}x).`);
+      setMsg(`Backtest started — see status below.`);
     } catch (e) {
       setMsg(`Error: ${String(e)}`);
     }
   }
 
-  const points = (equity.data ?? []).map((e: any) => ({
+  const dbPoints = (equity.data ?? []).map((e: any) => ({
     time: Math.floor(new Date(e.ts).getTime() / 1000),
     value: parseFloat(e.equity),
   }));
+  const wsPoints = runEquity.map((p) => ({
+    time: Math.floor(p.ts / 1000),
+    value: p.equity,
+  }));
+  const points = dbPoints.length >= wsPoints.length ? dbPoints : wsPoints;
   const last = equity.data?.[equity.data.length - 1];
+  const waiting =
+    !!runId &&
+    !points.length &&
+    (status === "started" || status === "running" || status === null || status === "unknown");
 
   return (
     <div className="space-y-5">
@@ -159,16 +172,38 @@ export default function Backtest() {
 
       {runId && (
         <>
+          <RunStatusPanel runId={runId} />
+
           <Card>
-            <CardTitle right={last ? <Badge tone="accent">final {usd(last.equity)}</Badge> : null}>
+            <CardTitle
+              right={
+                last ? (
+                  <Badge tone="accent">final {usd(last.equity)}</Badge>
+                ) : status ? (
+                  <Badge tone={status === "finished" ? "up" : "warn"}>{status}</Badge>
+                ) : null
+              }
+            >
               Equity curve
             </CardTitle>
-            {points.length ? <EquityChart data={points} /> : <Empty>Waiting for results…</Empty>}
+            {points.length ? (
+              <EquityChart data={points} />
+            ) : waiting ? (
+              <Empty>Running backtest… equity points will appear here (WebSocket + database).</Empty>
+            ) : (
+              <Empty>
+                No equity data. Check errors above — often no klines for the date range or
+                trading-worker / db-writer not running.
+              </Empty>
+            )}
           </Card>
+
           <Card>
             <CardTitle>Trades</CardTitle>
             {!fills.data?.length ? (
-              <Empty>No trades yet</Empty>
+              <Empty>
+                {status === "finished" ? "No trades in this backtest" : "Waiting for trades…"}
+              </Empty>
             ) : (
               <Table head={["Time", "Symbol", "Side", "Qty", "Price", "PnL"]}>
                 {fills.data.slice(0, 50).map((f: any, i: number) => (

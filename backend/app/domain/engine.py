@@ -113,6 +113,12 @@ class Engine:
                     await self._on_start(event, instruments)
                     started = True
                 await self._handle_event(event, instruments, summary)
+            if self.mode is Mode.BACKTEST and summary.events == 0:
+                await self._emit_error(
+                    "engine",
+                    "No bars processed — check symbols, date range, and Bitunix API connectivity.",
+                    detail="backtest_empty",
+                )
             await self._finalize(summary)
             await self._emit_run("finished")
         except Exception as exc:  # noqa: BLE001 - report then re-raise
@@ -365,14 +371,16 @@ class Engine:
         if track is not None:
             track.equity_curve.append((ts.isoformat(), equity))
 
-    async def _emit_error(self, source: str, message: str, detail: str = "") -> None:
+    async def _emit_error(
+        self, source: str, message: str, detail: str = "", *, severity: str = "error"
+    ) -> None:
         await self.sink.emit(
             ErrorEvent(
                 run_id=self.run_id,
                 mode=self.mode.value,
                 ts=self.clock.now(),
                 source=source,
-                severity="error",
+                severity=severity,
                 message=message,
                 detail=detail,
             )
