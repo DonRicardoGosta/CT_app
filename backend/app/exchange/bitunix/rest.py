@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from app.core.datetime_util import ensure_utc
 from app.core.logging import get_logger
 from app.domain.types import Bar, Instrument, OrderRequest, PositionSide, Side
 from app.exchange.bitunix.models import parse_instrument, parse_kline
@@ -143,27 +144,32 @@ class BitunixRest:
         start_time: object | None,
         end_time: object | None,
     ) -> list[Bar]:
-        from datetime import datetime, timedelta
+        from datetime import datetime
 
         def _ms(dt: datetime) -> int:
-            return int(dt.timestamp() * 1000)
+            return int(ensure_utc(dt).timestamp() * 1000)
 
-        end_dt = end_time if isinstance(end_time, datetime) else datetime.now().astimezone()
-        start_dt = start_time if isinstance(start_time, datetime) else None
+        end_dt = ensure_utc(
+            end_time if isinstance(end_time, datetime) else datetime.now().astimezone()
+        )
+        start_dt = ensure_utc(start_time) if isinstance(start_time, datetime) else None
 
-        all_bars: list[Bar] = []
-        cursor_ms: int | None = _ms(start_dt) if start_dt else None
+        start_ms = _ms(start_dt) if start_dt else None
         end_ms = _ms(end_dt)
+        page_end_ms = end_ms
+        seen: set[int] = set()
+        all_bars: list[Bar] = []
 
-        for _ in range(500):  # safety cap
+        # Bitunix returns klines *before* endTime (newest first). Paginate backward.
+        for _ in range(500):
             params: dict[str, object] = {
                 "symbol": symbol,
                 "interval": interval,
                 "limit": 200,
-                "endTime": end_ms,
+                "endTime": page_end_ms,
             }
-            if cursor_ms is not None:
-                params["startTime"] = cursor_ms
+            if start_ms is not None:
+                params["startTime"] = start_ms
             data = await self._request(
                 "GET", "/api/v1/futures/market/kline", params=params
             )
@@ -171,14 +177,22 @@ class BitunixRest:
             if not batch:
                 break
             batch.sort(key=lambda b: b.open_time)
-            all_bars.extend(batch)
+            for bar in batch:
+                key = _ms(bar.open_time)
+                if key in seen:
+                    continue
+                seen.add(key)
+                all_bars.append(bar)
+            oldest_ms = min(_ms(b.open_time) for b in batch)
+            if start_ms is not None and oldest_ms <= start_ms:
+                break
             if len(batch) < 200:
                 break
-            last_ms = _ms(batch[-1].open_time)
-            if cursor_ms is not None and last_ms <= cursor_ms:
+            next_end = oldest_ms - 1
+            if next_end >= page_end_ms:
                 break
-            cursor_ms = last_ms + 1
-            if cursor_ms >= end_ms:
+            page_end_ms = next_end
+            if start_ms is not None and page_end_ms < start_ms:
                 break
 
         all_bars.sort(key=lambda b: b.open_time)

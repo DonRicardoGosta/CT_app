@@ -120,9 +120,9 @@ export default function Backtest() {
               ))}
             </Select>
           </Field>
-          <Field label="Symbols (empty = auto up to 5)">
+          <Field label="Symbols (recommended: set explicitly)">
             <Input
-              placeholder="BTCUSDT, ETHUSDT"
+              placeholder="BTCUSDT, ETHUSDT, SOLUSDT"
               value={symbols}
               onChange={(e) => setSymbols(e.target.value)}
             />

@@ -116,7 +116,8 @@ class Engine:
             if self.mode is Mode.BACKTEST and summary.events == 0:
                 await self._emit_error(
                     "engine",
-                    "No bars processed — check symbols, date range, and Bitunix API connectivity.",
+                    "No bars processed — historical data was empty after load. "
+                    "Try BTCUSDT with a recent date range, or check Logs for kline fetch errors.",
                     detail="backtest_empty",
                 )
             await self._finalize(summary)

@@ -15,7 +15,7 @@ from app.core.logging import get_logger
 from app.domain.engine import Engine
 from app.events.bus import EventSink
 from app.events.schemas import ErrorEvent
-from app.services.builder import build_engine
+from app.services.builder import BuildError, build_engine
 from app.services.run_config import RunConfig
 
 log = get_logger(__name__)
@@ -46,6 +46,10 @@ class RunManager:
             engine = await build_engine(
                 config, self._sink, api_key=api_key, secret_key=secret_key
             )
+        except BuildError as exc:
+            detail = str(exc.details) if exc.details else ""
+            await self._emit_worker_error(config, f"{exc} {detail}".strip())
+            raise
         except Exception as exc:  # noqa: BLE001
             await self._emit_worker_error(config, f"Failed to build engine: {exc}")
             raise
