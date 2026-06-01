@@ -35,7 +35,8 @@ class RealtimeHub:
     """Owns WebSocket clients and the Kafka->WS broadcast loop."""
 
     def __init__(self) -> None:
-        self._clients: set[Client] = set()
+        # List, not set: Client holds a WebSocket (not hashable).
+        self._clients: list[Client] = []
         self._consumer: KafkaEventConsumer | None = None
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
@@ -71,12 +72,13 @@ class RealtimeHub:
         await ws.accept()
         client = Client(ws=ws, channels=set())
         async with self._lock:
-            self._clients.add(client)
+            self._clients.append(client)
         return client
 
     async def disconnect(self, client: Client) -> None:
         async with self._lock:
-            self._clients.discard(client)
+            with contextlib.suppress(ValueError):
+                self._clients.remove(client)
 
     def configure(self, client: Client, message: dict) -> None:
         """Apply a subscribe/unsubscribe message from a client."""
@@ -113,4 +115,5 @@ class RealtimeHub:
         if dead:
             async with self._lock:
                 for c in dead:
-                    self._clients.discard(c)
+                    with contextlib.suppress(ValueError):
+                        self._clients.remove(c)
