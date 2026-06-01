@@ -7,13 +7,7 @@ import EquityChart from "@/components/EquityChart";
 import RunStatusPanel from "@/components/RunStatusPanel";
 import { useRunMonitor } from "@/hooks/useRunMonitor";
 import { Badge, Button, Card, CardTitle, Empty, Field, Input, Select, Table, Td, Tr } from "@/components/ui";
-import { num, pnlClass, time, usd } from "@/lib/format";
-
-function toIsoDate(d: string, endOfDay: boolean): string | undefined {
-  if (!d) return undefined;
-  const suffix = endOfDay ? "T23:59:59" : "T00:00:00";
-  return new Date(`${d}${suffix}`).toISOString();
-}
+import { num, pnlClass, time, toIsoDateTime, usd } from "@/lib/format";
 
 export default function Backtest() {
   const { data: schemas } = useQuery({ queryKey: ["strategies"], queryFn: endpoints.strategies });
@@ -24,8 +18,8 @@ export default function Backtest() {
   const [symbols, setSymbols] = useState("");
   const [interval, setInterval] = useState("1m");
   const [capital, setCapital] = useState("1000");
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
+  const [fromDateTime, setFromDateTime] = useState("");
+  const [toDateTime, setToDateTime] = useState("");
   const [leverage, setLeverage] = useState("10");
   const [minInvest, setMinInvest] = useState("1");
   const [maxCapital, setMaxCapital] = useState("100");
@@ -54,8 +48,18 @@ export default function Backtest() {
 
   async function run() {
     setMsg("");
-    if (!fromDate || !toDate) {
-      setMsg("Please set both From date and To date.");
+    if (!fromDateTime || !toDateTime) {
+      setMsg("Please set both From and To date/time.");
+      return;
+    }
+    const backtest_start = toIsoDateTime(fromDateTime);
+    const backtest_end = toIsoDateTime(toDateTime);
+    if (!backtest_start || !backtest_end) {
+      setMsg("Invalid date/time — check From and To fields.");
+      return;
+    }
+    if (new Date(backtest_end) <= new Date(backtest_start)) {
+      setMsg("To must be after From.");
       return;
     }
     try {
@@ -69,8 +73,8 @@ export default function Backtest() {
           .filter(Boolean),
         interval,
         initial_capital: capital,
-        backtest_start: toIsoDate(fromDate, false),
-        backtest_end: toIsoDate(toDate, true),
+        backtest_start,
+        backtest_end,
         risk: {
           min_investment_usd: minInvest,
           max_capital_usd: maxCapital,
@@ -137,11 +141,19 @@ export default function Backtest() {
           <Field label="Initial capital (USD)">
             <Input type="number" value={capital} onChange={(e) => setCapital(e.target.value)} />
           </Field>
-          <Field label="From date">
-            <Input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} />
+          <Field label="From (date & time)">
+            <Input
+              type="datetime-local"
+              value={fromDateTime}
+              onChange={(e) => setFromDateTime(e.target.value)}
+            />
           </Field>
-          <Field label="To date">
-            <Input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} />
+          <Field label="To (date & time)">
+            <Input
+              type="datetime-local"
+              value={toDateTime}
+              onChange={(e) => setToDateTime(e.target.value)}
+            />
           </Field>
           <Field label="Leverage (x)">
             <Input type="number" value={leverage} onChange={(e) => setLeverage(e.target.value)} />
@@ -154,8 +166,8 @@ export default function Backtest() {
           </Field>
         </div>
         <p className="mt-2 text-xs text-muted">
-          TP/SL % in strategy params are on margin (ROE). Price levels use leverage: e.g. 2% SL at 10x ≈
-          0.2% price move.
+          Date/time uses your browser timezone, sent to the API as UTC. TP/SL % are on margin (ROE);
+          price distance = margin% ÷ leverage.
         </p>
         <div className="mt-3">
           {strategy && schemas?.[strategy] && (
