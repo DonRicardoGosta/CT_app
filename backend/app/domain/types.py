@@ -222,13 +222,19 @@ class Order:
 
 @dataclass(slots=True)
 class Position:
-    """A single open position (one per symbol+side in hedge mode)."""
+    """A single open position (one per symbol+side in hedge mode).
+
+    Ladder steps (REQ-006) accumulate into one position per direction. We store the
+    committed margin explicitly so steps opened at different leverage multipliers
+    are accounted correctly.
+    """
 
     symbol: str
     position_side: PositionSide
     qty: Decimal  # always positive; direction is in position_side
     entry_price: Decimal
     leverage: int
+    committed_margin: Decimal = Decimal("0")
     realized_pnl: Decimal = Decimal("0")
     mark_price: Decimal = Decimal("0")
     # Number of ladder steps that contributed to this position (REQ-006).
@@ -236,10 +242,8 @@ class Position:
 
     @property
     def margin(self) -> Decimal:
-        """Initial margin committed (notional / leverage)."""
-        if self.leverage <= 0:
-            return Decimal("0")
-        return (self.entry_price * self.qty) / Decimal(self.leverage)
+        """Initial margin committed across all ladder steps."""
+        return self.committed_margin
 
     @property
     def notional(self) -> Decimal:
