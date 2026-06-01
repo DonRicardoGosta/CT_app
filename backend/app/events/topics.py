@@ -17,6 +17,8 @@ class Topics:
         self.errors = f"{prefix}.errors"
         self.market = f"{prefix}.market"
         self.runs = f"{prefix}.runs"
+        # Control commands (start/stop a run) sent from the API to the worker.
+        self.control = f"{prefix}.control"
 
     def all(self) -> list[str]:
         return [
@@ -27,6 +29,18 @@ class Topics:
             self.equity,
             self.errors,
             self.market,
+            self.runs,
+        ]
+
+    def realtime(self) -> list[str]:
+        """Topics the API forwards to browsers over WebSocket."""
+        return [
+            self.orders,
+            self.fills,
+            self.positions,
+            self.signals,
+            self.equity,
+            self.errors,
             self.runs,
         ]
 
