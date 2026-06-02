@@ -1,9 +1,65 @@
 # Full stack: one command brings up everything (REQ-011).
 # The three backend services share one image with different entrypoints.
+#
+# Resource limits (16 GB RAM laptop — e.g. i7 + 16 GB):
+# Caps total Docker usage around ~4 GB so Windows, browser and IDE stay responsive.
+# Requires Docker Compose V2 (docker compose up applies deploy.resources locally).
+# If the stack feels tight, lower limits further or raise Docker Desktop memory (WSL2).
+
+x-resources:
+  postgres: &resources-postgres
+    deploy:
+      resources:
+        limits:
+          cpus: "0.75"
+          memory: 512M
+        reservations:
+          memory: 256M
+  redpanda: &resources-redpanda
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+        reservations:
+          memory: 384M
+  api: &resources-api
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          memory: 256M
+  worker: &resources-worker
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+        reservations:
+          memory: 384M
+  writer: &resources-writer
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 384M
+        reservations:
+          memory: 128M
+  frontend: &resources-frontend
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+        reservations:
+          memory: 64M
 
 services:
   postgres:
     image: postgres:16-alpine
+    <<: *resources-postgres
     environment:
       POSTGRES_USER: bitunix
       POSTGRES_PASSWORD: bitunix
@@ -20,6 +76,7 @@ services:
 
   redpanda:
     image: redpandadata/redpanda:v24.2.7
+    <<: *resources-redpanda
     command:
       - redpanda
       - start
@@ -28,6 +85,8 @@ services:
       - --node-id=0
       - --kafka-addr=PLAINTEXT://0.0.0.0:9092
       - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+      - --memory=512M
+      - --reserve-memory=0M
     ports:
       - "9092:9092"
     healthcheck:
@@ -38,6 +97,7 @@ services:
 
   backend-api:
     build: ./backend
+    <<: *resources-api
     command: >-
       sh -c "alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000"
@@ -56,6 +116,7 @@ services:
 
   trading-worker:
     build: ./backend
+    <<: *resources-worker
     command: python -m app.workers.trading_worker
     environment:
       DATABASE_URL: postgresql+asyncpg://bitunix:bitunix@postgres:5432/bitunix
@@ -70,6 +131,7 @@ services:
 
   db-writer:
     build: ./backend
+    <<: *resources-writer
     command: python -m app.workers.db_writer
     environment:
       DATABASE_URL: postgresql+asyncpg://bitunix:bitunix@postgres:5432/bitunix
@@ -84,6 +146,7 @@ services:
 
   frontend:
     build: ./frontend
+    <<: *resources-frontend
     ports:
       - "8080:80"
     depends_on:
