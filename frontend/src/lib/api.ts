@@ -128,7 +128,16 @@ export const endpoints = {
   symbolSummary: (runId?: string) =>
     api.get<any[]>(`/history/symbol-summary${runId ? `?run_id=${runId}` : ""}`),
   equity: (runId: string) => api.get<any[]>(`/history/equity?run_id=${runId}`),
-  errors: () => api.get<any[]>("/history/errors"),
+  errors: (runId?: string) =>
+    api.get<any[]>(`/history/errors${runId ? `?run_id=${runId}` : ""}`),
+  systemStatus: () =>
+    api.get<{
+      api: string;
+      control_bus: boolean;
+      realtime_hub: boolean;
+      recent_runs: RunRow[];
+      hints: string[];
+    }>("/system/status"),
   startRun: (b: unknown) => api.post<{ run_id: string; mode: string }>("/control/start", b),
   stopRun: (runId: string) => api.post<{ run_id: string }>(`/control/stop/${runId}`),
 };

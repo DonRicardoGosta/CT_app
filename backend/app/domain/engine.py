@@ -96,6 +96,7 @@ class Engine:
         self.run_id = run_id or uuid.uuid4().hex
         self.market = MarketState(max_history=max_history)
         self._stop = False
+        self._watch_symbols: list[str] = []
 
     def request_stop(self) -> None:
         """Ask the loop to finish after the current event (live use)."""
@@ -116,6 +117,12 @@ class Engine:
                     await self._on_start(event, instruments)
                     started = True
                 await self._handle_event(event, instruments, summary)
+            if self.mode is Mode.BACKTEST and summary.events == 0:
+                await self._emit_error(
+                    "engine",
+                    "No bars processed — check symbols, date range, and Bitunix API.",
+                    detail="backtest_empty",
+                )
             await self._finalize(summary)
             await self._emit_run("finished")
         except Exception as exc:  # noqa: BLE001 - report then re-raise
@@ -135,6 +142,9 @@ class Engine:
             market=self.market,
         )
         await self.strategy.on_start(ctx)
+        self._watch_symbols = self.strategy.desired_symbols(instruments)
+        for sym in self._watch_symbols:
+            await self._emit_symbol_summary(sym, status="scanning")
 
     async def _handle_event(
         self,
@@ -153,6 +163,16 @@ class Engine:
         await self._emit_market(event)
         if event.type is MarketEventType.BAR and event.bar is not None:
             await self._emit_candle(event.bar)
+            sym = event.bar.symbol
+            if not self._watch_symbols or sym in self._watch_symbols:
+                price = self.market.last_price(sym)
+                await self._emit_symbol_summary(sym)
+                if price is not None:
+                    await self._emit_trade_level(
+                        symbol=sym,
+                        current_price=price,
+                        source="bar",
+                    )
 
         # 2) strategy decision (pure)
         account = await self.broker.account()
