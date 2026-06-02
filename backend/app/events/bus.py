@@ -44,6 +44,10 @@ def topic_for(event: BaseEvent, topics: Topics) -> str:
         EventType.ERROR: topics.errors,
         EventType.RUN: topics.runs,
         EventType.MARKET: topics.market,
+        EventType.CANDLE: topics.candles,
+        EventType.TRADE_LEVEL: topics.trade_levels,
+        EventType.WATCHLIST: topics.watchlist,
+        EventType.SYMBOL_SUMMARY: topics.symbol_summaries,
     }[etype]
 
 

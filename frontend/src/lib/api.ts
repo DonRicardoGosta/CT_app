@@ -92,4 +92,18 @@ export const endpoints = {
   errors: () => api.get<any[]>("/history/errors"),
   startRun: (b: unknown) => api.post<{ run_id: string; mode: string }>("/control/start", b),
   stopRun: (runId: string) => api.post<{ run_id: string }>(`/control/stop/${runId}`),
+  klines: (args: { symbol: string; interval: string; limit?: number }) => {
+    const params = new URLSearchParams({ symbol: args.symbol, interval: args.interval });
+    if (args.limit) params.set("limit", String(args.limit));
+    return api.get<Kline[]>(`/market/klines?${params.toString()}`);
+  },
 };
+
+export interface Kline {
+  t: number;
+  o: string;
+  h: string;
+  l: string;
+  c: string;
+  v: string;
+}

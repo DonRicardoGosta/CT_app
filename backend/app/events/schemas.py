@@ -22,6 +22,10 @@ class EventType(StrEnum):
     EQUITY = "equity"
     ERROR = "error"
     MARKET = "market"
+    CANDLE = "candle"
+    TRADE_LEVEL = "trade_level"
+    WATCHLIST = "watchlist"
+    SYMBOL_SUMMARY = "symbol_summary"
     RUN = "run"
 
 
@@ -92,6 +96,68 @@ class SignalEvent(BaseEvent):
     tag: str = ""
 
 
+class MarketPriceEvent(BaseEvent):
+    """Last-price tick for a symbol, used for the live price line/ticker."""
+
+    type: Literal[EventType.MARKET] = EventType.MARKET
+    symbol: str
+    price: Decimal
+    source: str = "engine"
+
+
+class CandleEvent(BaseEvent):
+    """A closed OHLCV candle at the run's interval (for live chart updates)."""
+
+    type: Literal[EventType.CANDLE] = EventType.CANDLE
+    symbol: str
+    interval: str
+    open_time: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
+    closed: bool = True
+
+
+class TradeLevelEvent(BaseEvent):
+    """Chart overlay levels for planned/actual entry, TP and SL per symbol."""
+
+    type: Literal[EventType.TRADE_LEVEL] = EventType.TRADE_LEVEL
+    symbol: str
+    position_side: str | None = None
+    current_price: Decimal | None = None
+    planned_entry: Decimal | None = None
+    actual_entry: Decimal | None = None
+    take_profit: Decimal | None = None
+    stop_loss: Decimal | None = None
+    source: str = "engine"
+
+
+class WatchlistEvent(BaseEvent):
+    """The set of symbols the strategy selected for this run (emitted on start)."""
+
+    type: Literal[EventType.WATCHLIST] = EventType.WATCHLIST
+    symbols: list[str] = Field(default_factory=list)
+    interval: str = "1m"
+    strategy: str = ""
+
+
+class SymbolSummaryEvent(BaseEvent):
+    """Compact per-symbol state for the coin cards."""
+
+    type: Literal[EventType.SYMBOL_SUMMARY] = EventType.SYMBOL_SUMMARY
+    symbol: str
+    status: str = "scanning"  # scanning | pending_order | in_position
+    last_price: Decimal | None = None
+    position_side: str | None = None
+    unrealized_pnl: Decimal | None = None
+    realized_pnl: Decimal | None = None
+    step_count: int | None = None
+    max_steps: int | None = None
+    last_signal_reason: str = ""
+
+
 class EquityEvent(BaseEvent):
     type: Literal[EventType.EQUITY] = EventType.EQUITY
     balance: Decimal
@@ -125,5 +191,10 @@ EVENT_MODELS: dict[EventType, type[BaseEvent]] = {
     EventType.SIGNAL: SignalEvent,
     EventType.EQUITY: EquityEvent,
     EventType.ERROR: ErrorEvent,
+    EventType.MARKET: MarketPriceEvent,
+    EventType.CANDLE: CandleEvent,
+    EventType.TRADE_LEVEL: TradeLevelEvent,
+    EventType.WATCHLIST: WatchlistEvent,
+    EventType.SYMBOL_SUMMARY: SymbolSummaryEvent,
     EventType.RUN: RunEvent,
 }

@@ -25,22 +25,29 @@ from app.domain.interfaces import Broker, MarketDataFeed
 from app.domain.market import MarketState
 from app.domain.types import (
     AccountState,
+    Bar,
     Instrument,
     MarketEvent,
     MarketEventType,
     Mode,
     Order,
     OrderStatus,
+    PositionSide,
 )
 from app.events.bus import EventSink
 from app.events.schemas import (
+    CandleEvent,
     EquityEvent,
     ErrorEvent,
     FillEvent,
+    MarketPriceEvent,
     OrderEvent,
     PositionEvent,
     RunEvent,
     SignalEvent,
+    SymbolSummaryEvent,
+    TradeLevelEvent,
+    WatchlistEvent,
 )
 from app.risk.sizer import RiskSizer
 from app.strategies.base import Strategy, StrategyContext
@@ -90,6 +97,8 @@ class Engine:
         self.run_id = run_id or uuid.uuid4().hex
         self.market = MarketState(max_history=max_history)
         self._stop = False
+        self._watch_symbols: list[str] = []
+        self._interval = "1m"
 
     def request_stop(self) -> None:
         """Ask the loop to finish after the current event (live use)."""
@@ -129,6 +138,12 @@ class Engine:
             market=self.market,
         )
         await self.strategy.on_start(ctx)
+        if event.bar is not None:
+            self._interval = event.bar.interval
+        self._watch_symbols = self.strategy.desired_symbols(instruments)
+        await self._emit_watchlist()
+        for sym in self._watch_symbols:
+            await self._emit_symbol_summary(sym, status="scanning")
 
     async def _handle_event(
         self,
@@ -144,6 +159,11 @@ class Engine:
         else:
             self.market.update_price(event.symbol, event.price)
         await self.broker.set_mark(event.symbol, event.price)
+        await self._emit_market(event)
+        if event.type is MarketEventType.BAR and event.bar is not None:
+            await self._emit_candle(event.bar)
+            if not self._watch_symbols or event.bar.symbol in self._watch_symbols:
+                await self._emit_symbol_summary(event.bar.symbol)
 
         # 2) strategy decision (pure)
         account = await self.broker.account()
@@ -166,6 +186,16 @@ class Engine:
             price = self.market.last_price(intent.symbol)
             if price is None:
                 continue
+            leverage = self.sizer.params.base_leverage
+            await self._emit_trade_level(
+                symbol=intent.symbol,
+                position_side=intent.position_side.value,
+                current_price=price,
+                planned_entry=price,
+                stop_loss=intent.stop_price,
+                take_profit=self._take_profit_price(price, intent.position_side, leverage),
+                source="strategy",
+            )
             account = await self.broker.account()  # refresh between intents
             result = self.sizer.size(intent, account, instrument, price)
             if not result.ok or result.request is None:
@@ -175,11 +205,26 @@ class Engine:
             order = await self.broker.submit(result.request)
             await self._emit_order(order)
             summary.orders += 1
+            if order.status is not OrderStatus.FILLED:
+                await self._emit_symbol_summary(order.symbol, status="pending_order")
             if order.status is OrderStatus.FILLED:
                 summary.fills += len(order.fills)
                 for fill in order.fills:
                     await self._emit_fill(fill)
                 await self._emit_positions_for(order.symbol)
+                entry = order.avg_fill_price or price
+                await self._emit_trade_level(
+                    symbol=order.symbol,
+                    position_side=order.position_side.value,
+                    current_price=self.market.last_price(order.symbol),
+                    actual_entry=entry,
+                    stop_loss=result.request.stop_price,
+                    take_profit=self._take_profit_price(
+                        entry, order.position_side, order.leverage
+                    ),
+                    source="order",
+                )
+                await self._emit_symbol_summary(order.symbol, status="in_position")
 
         # 5) equity snapshot
         await self._emit_equity()
@@ -223,6 +268,129 @@ class Engine:
                 tag=intent.tag,
             )
         )
+
+    async def _emit_market(self, event: MarketEvent) -> None:
+        await self.sink.emit(
+            MarketPriceEvent(
+                run_id=self.run_id,
+                mode=self.mode.value,
+                ts=event.ts,
+                symbol=event.symbol,
+                price=event.price,
+            )
+        )
+
+    async def _emit_candle(self, bar: Bar) -> None:
+        await self.sink.emit(
+            CandleEvent(
+                run_id=self.run_id,
+                mode=self.mode.value,
+                ts=self.clock.now(),
+                symbol=bar.symbol,
+                interval=bar.interval,
+                open_time=bar.open_time,
+                open=bar.open,
+                high=bar.high,
+                low=bar.low,
+                close=bar.close,
+                volume=bar.volume,
+                closed=True,
+            )
+        )
+
+    async def _emit_watchlist(self) -> None:
+        await self.sink.emit(
+            WatchlistEvent(
+                run_id=self.run_id,
+                mode=self.mode.value,
+                ts=self.clock.now(),
+                symbols=list(self._watch_symbols),
+                interval=self._interval,
+                strategy=self.strategy.name,
+            )
+        )
+
+    async def _emit_trade_level(
+        self,
+        *,
+        symbol: str,
+        position_side: str | None = None,
+        current_price: Decimal | None = None,
+        planned_entry: Decimal | None = None,
+        actual_entry: Decimal | None = None,
+        take_profit: Decimal | None = None,
+        stop_loss: Decimal | None = None,
+        source: str = "engine",
+    ) -> None:
+        await self.sink.emit(
+            TradeLevelEvent(
+                run_id=self.run_id,
+                mode=self.mode.value,
+                ts=self.clock.now(),
+                symbol=symbol,
+                position_side=position_side,
+                current_price=current_price,
+                planned_entry=planned_entry,
+                actual_entry=actual_entry,
+                take_profit=take_profit,
+                stop_loss=stop_loss,
+                source=source,
+            )
+        )
+
+    async def _emit_symbol_summary(
+        self, symbol: str, *, status: str | None = None, last_signal_reason: str = ""
+    ) -> None:
+        account = await self.broker.account()
+        marks = self.market.marks()
+        mark = marks.get(symbol)
+        positions = [
+            pos for (sym, _side), pos in account.positions.items() if sym == symbol
+        ]
+        pos = positions[0] if positions else None
+        last_price = mark or (pos.entry_price if pos is not None else None)
+        await self.sink.emit(
+            SymbolSummaryEvent(
+                run_id=self.run_id,
+                mode=self.mode.value,
+                ts=self.clock.now(),
+                symbol=symbol,
+                status=status
+                or ("in_position" if pos is not None and pos.qty > 0 else "scanning"),
+                last_price=last_price,
+                position_side=pos.position_side.value if pos is not None else None,
+                unrealized_pnl=pos.unrealized_pnl(last_price)
+                if pos is not None and last_price is not None
+                else None,
+                realized_pnl=pos.realized_pnl if pos is not None else None,
+                step_count=pos.step_count if pos is not None else None,
+                max_steps=self._max_steps(),
+                last_signal_reason=last_signal_reason,
+            )
+        )
+
+    def _max_steps(self) -> int | None:
+        steps = getattr(self.strategy.params, "ladder_steps", None)
+        return int(steps) if steps is not None else None
+
+    def _take_profit_price(
+        self, price: Decimal | None, position_side: PositionSide, leverage: int
+    ) -> Decimal | None:
+        """Convert the strategy's take-profit % (ROE on margin) to a price level.
+
+        ``take_profit_pct`` is return on margin, so the required price move is
+        ``pct / leverage`` (REQ-007). Returns ``None`` if the strategy has no TP.
+        """
+        if price is None:
+            return None
+        pct = getattr(self.strategy.params, "take_profit_pct", None)
+        if pct is None:
+            return None
+        lev = max(int(leverage), 1)
+        move = (Decimal(str(pct)) / Decimal(lev)) / Decimal(100)
+        if position_side is PositionSide.LONG:
+            return price * (Decimal(1) + move)
+        return price * (Decimal(1) - move)
 
     async def _emit_signal_rejection(self, intent, reason: str) -> None:
         await self.sink.emit(

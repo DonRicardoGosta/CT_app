@@ -8,6 +8,11 @@ export type Channel =
   | "signal"
   | "equity"
   | "error"
+  | "market"
+  | "candle"
+  | "trade_level"
+  | "watchlist"
+  | "symbol_summary"
   | "run";
 
 export interface RealtimeEvent {

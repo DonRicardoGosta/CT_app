@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -114,13 +115,80 @@ class BitunixRest:
         return out
 
     async def get_klines(
-        self, symbol: str, interval: str = "1m", limit: int = 200
+        self,
+        symbol: str,
+        interval: str = "1m",
+        limit: int = 200,
+        *,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
     ) -> list[Bar]:
-        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        """Fetch klines. Pass ``start_time``/``end_time`` for a historical range."""
+        if start_time is not None or end_time is not None:
+            return await self._get_klines_range(symbol, interval, start_time, end_time)
+        params = {"symbol": symbol, "interval": interval, "limit": min(limit, 200)}
         data = await self._request("GET", "/api/v1/futures/market/kline", params=params)
         bars = [parse_kline(symbol, interval, item) for item in (data or [])]
         bars.sort(key=lambda b: b.open_time)
         return bars
+
+    async def _get_klines_range(
+        self,
+        symbol: str,
+        interval: str,
+        start_time: datetime | None,
+        end_time: datetime | None,
+    ) -> list[Bar]:
+        """Paginate klines backward (Bitunix returns candles before ``endTime``)."""
+
+        def _utc(dt: datetime) -> datetime:
+            return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+        def _ms(dt: datetime) -> int:
+            return int(_utc(dt).timestamp() * 1000)
+
+        end_dt = _utc(end_time) if end_time else datetime.now(UTC)
+        start_dt = _utc(start_time) if start_time else None
+        start_ms = _ms(start_dt) if start_dt else None
+        page_end_ms = _ms(end_dt)
+        seen: set[int] = set()
+        all_bars: list[Bar] = []
+
+        for _ in range(500):  # safety cap
+            params: dict[str, Any] = {
+                "symbol": symbol,
+                "interval": interval,
+                "limit": 200,
+                "endTime": page_end_ms,
+            }
+            if start_ms is not None:
+                params["startTime"] = start_ms
+            data = await self._request(
+                "GET", "/api/v1/futures/market/kline", params=params
+            )
+            batch = [parse_kline(symbol, interval, item) for item in (data or [])]
+            if not batch:
+                break
+            batch.sort(key=lambda b: b.open_time)
+            for bar in batch:
+                key = _ms(bar.open_time)
+                if key not in seen:
+                    seen.add(key)
+                    all_bars.append(bar)
+            oldest_ms = min(_ms(b.open_time) for b in batch)
+            if (start_ms is not None and oldest_ms <= start_ms) or len(batch) < 200:
+                break
+            next_end = oldest_ms - 1
+            if next_end >= page_end_ms:
+                break
+            page_end_ms = next_end
+            if start_ms is not None and page_end_ms < start_ms:
+                break
+
+        all_bars.sort(key=lambda b: b.open_time)
+        if start_dt:
+            all_bars = [b for b in all_bars if b.open_time >= start_dt]
+        return [b for b in all_bars if b.open_time <= end_dt]
 
     # -- private ------------------------------------------------------------ #
     async def get_account(self) -> Any:
