@@ -14,20 +14,15 @@ import pytest
 
 from app.domain.brokers.sim import SimBroker
 from app.domain.clock import SimulatedClock
-from app.domain.engine import Engine
+from app.domain.engine import Engine, EngineSummary
 from app.domain.feeds.replay import ReplayFeed
 from app.domain.types import (
-    AccountState,
     Bar,
     Instrument,
     IntentAction,
-    MarketEvent,
-    MarketEventType,
     Mode,
     PositionSide,
-    Tick,
 )
-from app.strategies.base import StrategyContext
 from app.events.bus import InMemorySink
 from app.events.schemas import ErrorEvent, TradeLevelEvent, WatchlistEvent
 from app.risk.config import RiskParams
@@ -158,7 +153,9 @@ async def test_scan_diagnostic_logs_emitted():
     assert scan_logs, "strategy scan logs expected"
     assert any("scan BTCUSDT" in log.message for log in scan_logs)
     assert any(
-        "warming up" in log.message or "no trend" in log.message or "RSI" in log.message
+        "not enough history" in log.message
+        or "no trend" in log.message
+        or "RSI" in log.message
         for log in scan_logs
     )
 
@@ -219,33 +216,6 @@ def test_position_levels_uses_leverage():
     assert lv["stops"], "an initial stop level must be present"
 
 
-def test_scan_diagnostics_on_tick_before_first_bar():
-    from app.domain.market import MarketState
-
-    strat = create_strategy("trend_scanner", {"scan_universe": 5, "max_scan_rank": 10})
-    instruments = _instruments()
-    strat.desired_symbols(instruments)
-    market = MarketState()
-    market.update_price("BTCUSDT", Decimal("100"))
-    ctx = StrategyContext(
-        event=MarketEvent(
-            type=MarketEventType.TICK,
-            ts=_EPOCH,
-            symbol="BTCUSDT",
-            tick=Tick(symbol="BTCUSDT", price=Decimal("100"), ts=_EPOCH),
-        ),
-        now=_EPOCH,
-        account=AccountState(ts=_EPOCH, balance=Decimal("1000")),
-        instruments=instruments,
-        market=market,
-        interval="5m",
-    )
-    strat.scan_diagnostics(ctx)
-    logs = strat.drain_scan_logs()
-    assert logs
-    assert "waiting for first closed 5m candle" in logs[0]["message"]
-
-
 def test_desired_symbols_preserves_volume_rank_order_and_caps_to_max_rank():
     instruments = _multi_instruments(12)
     # Simulate builder volume ordering by inserting symbols in reverse rank order.
@@ -258,44 +228,141 @@ def test_desired_symbols_preserves_volume_rank_order_and_caps_to_max_rank():
     assert desired == list(ranked)[:7]
 
 
-def test_selection_expands_one_volume_batch_at_a_time():
+def test_selection_snapshot_lists_remaining_universe_as_scanning():
     instruments = _multi_instruments(7)
+    strat = create_strategy(
+        "trend_scanner", {"max_scan_rank": 7, "max_symbols": 5}
+    )
+    strat.desired_symbols(instruments)
+
+    class Ctx:
+        def __init__(self) -> None:
+            self.instruments = instruments
+
+    snap = strat.selection_snapshot(Ctx())
+    assert snap["target"] == 5
+    assert snap["selected"] == []
+    # Nothing selected yet -> the whole ranked universe is "scanning".
+    assert len(snap["scanning"]) == 7
+
+    strat._ensure_selected("COIN00USDT")
+    snap = strat.selection_snapshot(Ctx())
+    assert snap["selected"] == ["COIN00USDT"]
+    assert "COIN00USDT" not in snap["scanning"]
+    assert len(snap["scanning"]) == 6
+
+
+class _FakeHistory:
+    """History provider returning a canned bar series per symbol."""
+
+    def __init__(self, series: dict[str, list[Bar]]) -> None:
+        self.series = series
+        self.calls: list[str] = []
+
+    async def get_recent_klines(self, symbol: str, interval: str, count: int):
+        self.calls.append(symbol)
+        return self.series.get(symbol, [])
+
+
+def _bars_from_prices(symbol: str, prices: list[float]) -> list[Bar]:
+    out = []
+    for i, price in enumerate(prices):
+        p = Decimal(str(round(price, 4)))
+        out.append(
+            Bar(
+                symbol=symbol,
+                interval="1m",
+                open_time=_EPOCH + timedelta(minutes=i),
+                open=p,
+                high=p,
+                low=p,
+                close=p,
+                volume=Decimal("1"),
+            )
+        )
+    return out
+
+
+def _flat_bars(symbol: str, n: int, price: float = 100.0) -> list[Bar]:
+    return _bars_from_prices(symbol, [price] * n)
+
+
+def _long_entry_series(symbol: str, n: int = 120) -> list[Bar]:
+    """Uptrend that ends with a one-bar dip then a recovery (a long entry now)."""
+    prices = [10.0 + i for i in range(n - 2)]
+    prices.append(prices[-1] - 5.0)  # pullback dip -> RSI drops below threshold
+    prices.append(prices[-1] + 6.0)  # recovery -> RSI turns up = entry trigger
+    return _bars_from_prices(symbol, prices)
+
+
+@pytest.mark.asyncio
+async def test_prescan_evaluates_coins_one_by_one_until_target():
+    from app.domain.brokers.sim import SimBroker
+    from app.domain.clock import RealClock
+    from app.domain.feeds.live import LiveFeed
+
+    symbols = [f"COIN{i:02d}USDT" for i in range(6)]
+    instruments = {s: _multi_instruments(6)[s] for s in symbols}
+
+    # Two coins have an uptrend ending in a pullback+recovery (entry), the rest
+    # are flat (no trend) so the scan keeps moving.
+    series: dict[str, list[Bar]] = {}
+    for s in symbols:
+        series[s] = _flat_bars(s, 120)
+    series["COIN01USDT"] = _long_entry_series("COIN01USDT", n=120)
+    series["COIN03USDT"] = _long_entry_series("COIN03USDT", n=120)
+    history = _FakeHistory(series)
+
     strat = create_strategy(
         "trend_scanner",
         {
-            "scan_universe": 3,
-            "max_scan_rank": 7,
-            "max_symbols": 5,
-            "ema_fast": 2,
-            "ema_slow": 3,
-            "trend_ema": 5,
-            "rsi_period": 2,
+            "max_scan_rank": 6,
+            "max_symbols": 2,
+            "ema_fast": 5,
+            "ema_slow": 10,
+            "trend_ema": 20,
+            "rsi_period": 7,
+            "rsi_pullback_long": "60",
         },
     )
-    desired = strat.desired_symbols(instruments)
-    assert desired == list(instruments)[:7]
+    sizer = RiskSizer(
+        RiskParams(
+            min_investment_usd=Decimal("5"),
+            max_capital_usd=Decimal("100"),
+            base_leverage=5,
+        )
+    )
+    clock = RealClock()
+    broker = SimBroker(clock, instruments, Decimal("1000"), fee_rate=Decimal("0.0006"))
+    feed = LiveFeed([], instruments, "1m")
+    sink = InMemorySink()
+    engine = Engine(
+        mode=Mode.DRY_RUN,
+        strategy=strat,
+        sizer=sizer,
+        broker=broker,
+        feed=feed,
+        clock=clock,
+        sink=sink,
+        history=history,
+        interval="1m",
+    )
 
-    class Market:
-        def __init__(self, ready: int) -> None:
-            self.ready = ready
+    summary = EngineSummary(run_id="t", mode="dry_run", strategy="trend_scanner")
+    await engine._scan_and_select(instruments, summary)
 
-        def symbols(self):
-            return list(instruments)[: self.ready]
+    # Coins were fetched one by one, in ranked order.
+    assert history.calls[0] == "COIN00USDT"
+    # We stop once the target (2) is selected; we should not scan all 6.
+    assert len(strat._selected) == 2
+    assert len(history.calls) < 6
 
-        def closes(self, symbol: str):
-            idx = list(instruments).index(symbol)
-            return [Decimal("1")] * 6 if idx < self.ready else []
-
-    class Ctx:
-        def __init__(self, ready: int) -> None:
-            self.instruments = instruments
-            self.market = Market(ready)
-
-    # First 3 ready -> opens next batch, but only one expansion happens.
-    snap = strat.selection_snapshot(Ctx(ready=3))
-    assert snap["active_limit"] == 6
-    assert len(snap["scanning"]) == 6
-    # Now first 6 ready -> opens final batch.
-    snap = strat.selection_snapshot(Ctx(ready=6))
-    assert snap["active_limit"] == 7
-    assert len(snap["scanning"]) == 7
+    # Each scanned coin produced a strategy log; no "waiting for candle" noise.
+    msgs = [
+        e.message
+        for e in sink.events
+        if isinstance(e, ErrorEvent) and e.source == "strategy"
+    ]
+    assert any("scan COIN00USDT" in m for m in msgs)
+    assert all("waiting for first closed" not in m for m in msgs)
+    assert any("no trend" in m for m in msgs)

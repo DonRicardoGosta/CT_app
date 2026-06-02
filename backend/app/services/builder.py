@@ -63,17 +63,14 @@ def _resolve_symbols(
     return desired or list(instruments)[:5]
 
 
-def _initial_live_symbols(config: RunConfig, strategy, symbols: list[str]) -> list[str]:
-    """Subscribe only the active scan batch at startup.
+def _initial_live_symbols(config: RunConfig, symbols: list[str]) -> list[str]:
+    """Symbols the live feed subscribes to at startup.
 
-    The strategy may keep a top-500 ranked universe internally, but the live feed
-    should not open 500 WebSocket subscriptions at once. It starts with
-    ``scan_universe`` (30 by default) and the engine adds later batches on demand.
+    With explicit symbols we subscribe them directly. Otherwise the feed starts
+    empty: the engine scans the ranked universe one coin at a time via REST and
+    only subscribes the coins it selects for live management.
     """
-    if config.symbols:
-        return symbols
-    batch = int(getattr(strategy.params, "scan_universe", len(symbols)) or len(symbols))
-    return symbols[: max(batch, 1)]
+    return symbols if config.symbols else []
 
 
 def _reorder_instruments(
@@ -141,14 +138,16 @@ async def build_engine(
     if mode is Mode.BACKTEST and not config.symbols:
         feed_symbols = symbols[:BACKTEST_MAX_AUTO_SYMBOLS]
     elif mode is not Mode.BACKTEST:
-        feed_symbols = _initial_live_symbols(config, strategy, symbols)
+        feed_symbols = _initial_live_symbols(config, symbols)
     await _emit_builder_log(
         sink,
         config,
         "info",
-        f"resolved {len(feed_symbols)} active symbols",
+        f"resolved {len(symbols)} ranked coins to scan"
+        if mode is not Mode.BACKTEST and not config.symbols
+        else f"resolved {len(feed_symbols)} symbols",
         context={
-            "symbols": feed_symbols,
+            "feed_symbols": feed_symbols,
             "ranked_universe": len(symbols),
             "interval": config.interval,
         },
@@ -193,25 +192,10 @@ async def build_engine(
         await rest.close()
     else:
         clock = RealClock()
-        warmup = int(getattr(strategy, "warmup_bars", lambda: 0)() or 0)
-        # The feed preloads history via REST, so it keeps the client open for the
-        # life of the run (used at startup and when new scan batches subscribe).
-        feed = LiveFeed(
-            feed_symbols,
-            instruments,
-            config.interval,
-            rest=rest,
-            warmup_bars=warmup,
-        )
-        if warmup:
-            await _emit_builder_log(
-                sink,
-                config,
-                "info",
-                f"preloading {warmup} historical {config.interval} bars per coin "
-                "so the scanner can evaluate immediately",
-                context={"warmup_bars": warmup, "symbols": feed_symbols},
-            )
+        # The feed starts with only explicit symbols (usually none); the engine's
+        # one-by-one scan subscribes the coins it selects. The REST client stays
+        # open for the life of the run because the scan fetches history from it.
+        feed = LiveFeed(feed_symbols, instruments, config.interval)
         if mode is Mode.LIVE:
             broker = LiveBroker(rest)
         else:  # DRY_RUN: simulated fills on live prices
@@ -219,6 +203,10 @@ async def build_engine(
                 clock, instruments, config.initial_capital, fee_rate=config.risk.fee_rate
             )
 
+    # Live/dry auto-scan runs get the REST client as a history provider for the
+    # one-by-one scan. Backtests already have all bars; explicit-symbol runs trade
+    # exactly the requested coins (no universe scan), so they need no provider.
+    history = None if (mode is Mode.BACKTEST or config.symbols) else rest
     return Engine(
         mode=mode,
         strategy=strategy,
@@ -228,6 +216,8 @@ async def build_engine(
         clock=clock,
         sink=sink,
         run_id=config.run_id,
+        history=history,
+        interval=config.interval,
     )
 
 

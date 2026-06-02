@@ -88,6 +88,8 @@ class Engine:
         sink: EventSink,
         run_id: str | None = None,
         max_history: int = 1000,
+        history: object | None = None,
+        interval: str = "1m",
     ) -> None:
         self.mode = mode
         self.strategy = strategy
@@ -98,15 +100,16 @@ class Engine:
         self.sink = sink
         self.run_id = run_id or uuid.uuid4().hex
         self.market = MarketState(max_history=max_history)
+        # Optional historical-kline provider (BitunixRest) used to scan coins one
+        # by one before going live. ``None`` disables the pre-scan (e.g. backtest).
+        self._history = history
         self._stop = False
         self._universe: list[str] = []
         self._selected: list[str] = []
         self._scanning: list[str] = []
         self._target = 0
-        self._active_limit = 0
-        self._interval = "1m"
-        self._warmup_seeded = 0
-        self._warmup_done = False
+        self._interval = interval
+        self._scanned_once = False
 
     def request_stop(self) -> None:
         """Ask the loop to finish after the current event (live use)."""
@@ -126,6 +129,11 @@ class Engine:
         )
         started = False
         try:
+            # Live/dry: scan the ranked universe one coin at a time (fetch history,
+            # evaluate, decide) before streaming live data for the selected coins.
+            if self.mode is not Mode.BACKTEST and self._history is not None:
+                await self._scan_and_select(instruments, summary)
+                started = True
             async for event in self.feed.stream():
                 if self._stop:
                     break
@@ -188,10 +196,8 @@ class Engine:
             self._selected = list(snap.get("selected", []))
             self._scanning = list(snap.get("scanning", self._universe))
             self._target = int(snap.get("target", len(self._selected)))
-            self._active_limit = int(snap.get("active_limit", len(self._scanning)))
 
         await self._emit_watchlist()
-        await self._ensure_feed_symbols(self._scanning)
         await self._emit_log(
             "engine",
             "info",
@@ -205,19 +211,6 @@ class Engine:
                 "interval": self._interval,
             },
         )
-        if snap is not None and self._scanning:
-            await self._emit_log(
-                "strategy",
-                "info",
-                f"watching top {int(snap.get('active_limit', len(self._scanning)))} "
-                f"coins by 24h volume ({self._interval} bars)",
-                context={
-                    "scanning": self._scanning[:30],
-                    "target": self._target,
-                    "interval": self._interval,
-                },
-            )
-            await self._emit_scan_batch_logs(self._scanning, start_rank=1)
         for sym in self._selected:
             await self._emit_symbol_summary(sym, status="selected")
 
@@ -228,26 +221,6 @@ class Engine:
         summary: EngineSummary,
     ) -> None:
         summary.events += 1
-
-        # 0) warmup bars only seed rolling history; no trading, no event spam.
-        if event.warmup:
-            if event.bar is not None:
-                self.market.update_bar(event.bar)
-                self._interval = event.bar.interval
-                await self.broker.set_mark(event.symbol, event.price)
-            self._warmup_seeded += 1
-            return
-
-        if not self._warmup_done:
-            self._warmup_done = True
-            if self._warmup_seeded:
-                await self._emit_log(
-                    "strategy",
-                    "info",
-                    f"history preloaded ({self._warmup_seeded} bars); "
-                    "evaluating coins on live data now",
-                    context={"warmup_bars": self._warmup_seeded},
-                )
 
         # 1) update market state + broker mark
         if event.type is MarketEventType.BAR and event.bar is not None:
@@ -278,6 +251,24 @@ class Engine:
         await self._flush_strategy_logs()
 
         # 3-4) size + submit each intent
+        await self._process_intents(intents, instruments, summary)
+
+        # 5) refresh dynamic coin selection (may grow the watchlist)
+        await self._refresh_selection(ctx)
+        await self._flush_strategy_logs()
+        # 6) keep TP/SL overlays live for open positions on this symbol
+        if event.type is MarketEventType.BAR and event.bar is not None:
+            await self._emit_open_levels(event.bar.symbol)
+
+        # 7) equity snapshot
+        await self._emit_equity()
+
+    async def _process_intents(
+        self,
+        intents: list,
+        instruments: dict[str, Instrument],
+        summary: EngineSummary,
+    ) -> None:
         for intent in intents:
             await self._emit_signal(intent)
             await self._emit_log(
@@ -376,15 +367,151 @@ class Engine:
                 )
                 await self._emit_symbol_summary(order.symbol, status="in_position")
 
-        # 5) refresh dynamic coin selection (may grow the watchlist)
-        await self._refresh_selection(ctx)
-        await self._flush_strategy_logs()
-        # 6) keep TP/SL overlays live for open positions on this symbol
-        if event.type is MarketEventType.BAR and event.bar is not None:
-            await self._emit_open_levels(event.bar.symbol)
+    async def _scan_and_select(
+        self, instruments: dict[str, Instrument], summary: EngineSummary
+    ) -> None:
+        """Walk the volume-ranked universe one coin at a time (live/dry).
 
-        # 7) equity snapshot
-        await self._emit_equity()
+        For each coin: fetch its recent history, evaluate the strategy on it, log
+        the decision (entered / why not), and move on. Stops at ``max_symbols``
+        selected or when the universe is exhausted. Runs exactly once per engine,
+        so the search can never restart and overlap itself.
+        """
+        if self._scanned_once:
+            return
+        self._scanned_once = True
+
+        account = await self.broker.account()
+        placeholder = MarketEvent(
+            type=MarketEventType.TICK, ts=self.clock.now(), symbol=""
+        )
+        ctx0 = StrategyContext(
+            event=placeholder,
+            now=self.clock.now(),
+            account=account,
+            instruments=instruments,
+            market=self.market,
+            interval=self._interval,
+        )
+        await self.strategy.on_start(ctx0)
+        self._universe = self.strategy.desired_symbols(instruments)
+        snap = self.strategy.selection_snapshot(ctx0)
+        self._selected = list(snap.get("selected", [])) if snap else []
+        self._target = int(snap.get("target", len(self._universe))) if snap else len(
+            self._universe
+        )
+        self._scanning = [s for s in self._universe if s not in self._selected]
+        await self._emit_watchlist()
+        total = len(self._universe)
+        await self._emit_log(
+            "strategy",
+            "info",
+            f"scanning top {total} coins one by one by 24h volume "
+            f"(target {self._target}, {self._interval} candles)",
+            context={"total": total, "target": self._target, "interval": self._interval},
+        )
+
+        warmup = max(int(getattr(self.strategy, "warmup_bars", lambda: 0)() or 0), 1)
+        cadence = int(getattr(self.strategy.params, "scan_universe", 30) or 30)
+        scanned = 0
+        for symbol in self._universe:
+            if self._stop:
+                break
+            if self._target and len(self._selected) >= self._target:
+                await self._emit_log(
+                    "strategy",
+                    "info",
+                    f"target reached: {len(self._selected)}/{self._target} coins "
+                    f"selected after scanning {scanned}/{total}",
+                    context={"selected": list(self._selected)},
+                )
+                break
+            scanned += 1
+            bars = await self._fetch_history(symbol, warmup)
+            if not bars:
+                await self._emit_log(
+                    "strategy",
+                    "info",
+                    f"scan {symbol}: no historical data, skipping",
+                    context={"symbol": symbol, "check": "no_data"},
+                )
+            else:
+                for bar in bars:
+                    self.market.update_bar(bar)
+                last = bars[-1]
+                await self.broker.set_mark(symbol, last.close)
+                event = MarketEvent(
+                    type=MarketEventType.BAR,
+                    ts=last.open_time,
+                    symbol=symbol,
+                    bar=last,
+                )
+                acct = await self.broker.account()
+                ctx = StrategyContext(
+                    event=event,
+                    now=self.clock.now(),
+                    account=acct,
+                    instruments=instruments,
+                    market=self.market,
+                    interval=self._interval,
+                )
+                intents = self.strategy.on_event(ctx)
+                await self._flush_strategy_logs()
+                await self._process_intents(intents, instruments, summary)
+                await self._refresh_selection(ctx)
+            if scanned % cadence == 0:
+                await self._emit_log(
+                    "strategy",
+                    "info",
+                    f"scanned {scanned}/{total} coins, "
+                    f"selected {len(self._selected)}/{self._target}",
+                    context={
+                        "scanned": scanned,
+                        "total": total,
+                        "selected": len(self._selected),
+                        "target": self._target,
+                    },
+                )
+
+        await self._emit_log(
+            "strategy",
+            "info",
+            f"scan complete: evaluated {scanned}/{total} coins, "
+            f"selected {len(self._selected)}/{self._target}",
+            context={
+                "scanned": scanned,
+                "total": total,
+                "selected": list(self._selected),
+                "target": self._target,
+            },
+        )
+        self._scanning = []
+        await self._emit_watchlist()
+        if self._selected:
+            await self._ensure_feed_symbols(self._selected)
+        else:
+            await self._emit_log(
+                "strategy",
+                "warn",
+                f"no tradeable setups found in the top {total} coins; "
+                "nothing to trade right now",
+                context={"total": total},
+            )
+
+    async def _fetch_history(self, symbol: str, count: int) -> list[Bar]:
+        if self._history is None:
+            return []
+        try:
+            bars = await self._history.get_recent_klines(symbol, self._interval, count)
+        except Exception as exc:  # noqa: BLE001 - skip coins we can't fetch
+            await self._emit_log(
+                "strategy",
+                "warn",
+                f"scan {symbol}: history fetch failed: {exc}",
+                context={"symbol": symbol, "check": "fetch_failed"},
+            )
+            return []
+        return list(bars)
 
     async def _finalize(self, summary: EngineSummary) -> None:
         account = await self.broker.account()
@@ -489,35 +616,18 @@ class Engine:
         if snap is None:
             return
         selected = list(snap.get("selected", []))
-        scanning = list(snap.get("scanning", []))
-        target = int(snap.get("target", len(selected)))
-        active_limit = int(snap.get("active_limit", len(scanning) + len(selected)))
-        previous_scanning = set(self._scanning)
-        if (
-            selected == self._selected
-            and scanning == self._scanning
-            and target == self._target
-            and active_limit == self._active_limit
-        ):
+        if selected == self._selected:
             return
         newly = [s for s in selected if s not in self._selected]
         self._selected = selected
-        self._scanning = scanning
-        self._target = target
-        self._active_limit = active_limit
-        newly_scanning = [s for s in self._scanning if s not in previous_scanning]
-        await self._ensure_feed_symbols(newly_scanning)
+        self._target = int(snap.get("target", len(selected)))
         await self._emit_watchlist()
-        if newly_scanning:
-            start_rank = max(self._active_limit - len(newly_scanning) + 1, 1)
-            await self._emit_scan_batch_logs(newly_scanning, start_rank=start_rank)
         for sym in newly:
             await self._emit_symbol_summary(sym, status="selected")
             await self._emit_log(
                 "engine",
                 "info",
-                f"coin selected for trading: {sym} ({len(selected)}/{self._target}); "
-                "trading it now while scanner keeps searching",
+                f"coin selected for trading: {sym} ({len(selected)}/{self._target})",
                 context={"selected": selected, "target": self._target},
             )
 
@@ -530,24 +640,9 @@ class Engine:
         await self._emit_log(
             "strategy",
             "info",
-            f"subscribed next scan batch: {len(added)} coins",
-            context={"symbols": added, "active_limit": self._active_limit},
+            f"now streaming live data for {len(added)} selected coins",
+            context={"symbols": added},
         )
-
-    async def _emit_scan_batch_logs(self, symbols: list[str], *, start_rank: int) -> None:
-        for idx, symbol in enumerate(symbols, start=start_rank):
-            await self._emit_log(
-                "strategy",
-                "info",
-                f"scan {symbol}: queued in active volume batch, waiting for market data",
-                context={
-                    "symbol": symbol,
-                    "rank": idx,
-                    "check": "queued",
-                    "active_limit": self._active_limit,
-                    "target": self._target,
-                },
-            )
 
     async def _emit_open_levels(self, symbol: str) -> None:
         """Re-emit TP/SL overlays for any open position on ``symbol`` (live stop)."""

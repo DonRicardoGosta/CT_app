@@ -27,7 +27,6 @@ must be validated with a backtest before live use.
 
 from __future__ import annotations
 
-from collections import Counter
 from decimal import Decimal
 
 from pydantic import BaseModel, Field
@@ -49,13 +48,16 @@ class TrendScannerParams(BaseModel):
 
     # -- universe & selection ------------------------------------------------ #
     scan_universe: int = Field(
-        default=30, ge=1, le=200, description="Active scan batch size (top N by volume)."
+        default=30,
+        ge=1,
+        le=500,
+        description="Emit a scan-progress log line every N evaluated coins.",
     )
     max_scan_rank: int = Field(
         default=500,
         ge=1,
         le=1000,
-        description="Maximum volume rank to scan by expanding in scan_universe batches.",
+        description="How many of the top coins (by 24h volume) to scan, one by one.",
     )
     max_symbols: int = Field(
         default=5, ge=1, le=50, description="How many coins to actively trade at once."
@@ -128,85 +130,47 @@ class TrendScannerStrategy(Strategy):
         super().__init__(params)
         self.p: TrendScannerParams = self.params  # type: ignore[assignment]
         self._universe: list[str] = []
-        self._active_limit = self.p.scan_universe
         self._selected: list[str] = []
         # Per (symbol, side) trade state.
         self._last_entry: dict[tuple[str, str], Decimal] = {}
         self._tps_hit: dict[tuple[str, str], int] = {}
         self._stop: dict[tuple[str, str], Decimal] = {}
         self._best: dict[tuple[str, str], Decimal] = {}
-        self._prev_rsi: dict[str, Decimal] = {}
         self._pending_logs: list[dict] = []
         self._last_scan_reason: dict[str, str] = {}
-        self._bars_since_summary = 0
 
     # ------------------------------------------------------------------ #
     # Universe & selection
     # ------------------------------------------------------------------ #
     def desired_symbols(self, instruments: dict[str, Instrument]) -> list[str]:
         # Preserve instrument order. The builder pre-sorts this dict by 24h
-        # quote volume, so this becomes a top-volume ranked universe.
+        # quote volume, so this becomes a top-volume ranked universe. The engine
+        # walks this list one coin at a time (fetch history -> evaluate -> next).
         candidates = [
             sym for sym, inst in instruments.items() if inst.quote.upper() == "USDT"
         ]
         self._universe = candidates[: self.p.max_scan_rank]
-        self._active_limit = min(self.p.scan_universe, len(self._universe))
         return self._universe
 
     def selection_snapshot(self, context: StrategyContext) -> dict | None:
-        self._maybe_expand_active_batch(context)
-        active = (self._universe or list(context.instruments))[: self._active_limit]
-        scanning = [s for s in active if s not in self._selected]
+        scanning = [s for s in self._universe if s not in self._selected]
         return {
             "selected": list(self._selected),
             "scanning": scanning,
             "target": self.p.max_symbols,
-            "active_limit": self._active_limit,
         }
+
+    def is_full(self) -> bool:
+        """True once we have committed to the maximum number of coins."""
+        return len(self._selected) >= self.p.max_symbols
 
     def _required_history(self) -> int:
         return max(self.p.ema_slow, self.p.trend_ema, self.p.rsi_period) + 1
 
     def warmup_bars(self) -> int:
         # A small buffer over the strict requirement so indicators are stable on
-        # the first live bar (the last preloaded bar becomes the first closed bar).
+        # the first evaluated bar.
         return self._required_history() + 10
-
-    def _maybe_expand_active_batch(self, context: StrategyContext) -> None:
-        """Move from top 30 -> top 60 -> ... -> top 500, one batch at a time.
-
-        Expansion is synchronous and owned by the strategy instance, so one run
-        cannot start overlapping "next top coins" searches. A new batch is opened
-        only after every currently active symbol has enough bars to be evaluated
-        and we still have fewer than ``max_symbols`` selected.
-        """
-        if len(self._selected) >= self.p.max_symbols:
-            return
-        if self._active_limit >= len(self._universe):
-            return
-        active = self._universe[: self._active_limit]
-        required = self._required_history()
-        if not active:
-            return
-        ready = all(len(context.market.closes(sym)) >= required for sym in active)
-        if not ready:
-            return
-        prev = self._active_limit
-        self._active_limit = min(
-            self._active_limit + self.p.scan_universe,
-            len(self._universe),
-            self.p.max_scan_rank,
-        )
-        if self._active_limit > prev:
-            self._queue_scan_log(
-                "",
-                f"expanded volume scan to top {self._active_limit} "
-                f"(selected {len(self._selected)}/{self.p.max_symbols})",
-                check="batch_expand",
-                active_limit=self._active_limit,
-                selected=len(self._selected),
-                target=self.p.max_symbols,
-            )
 
     def drain_scan_logs(self) -> list[dict]:
         logs = self._pending_logs
@@ -233,54 +197,17 @@ class TrendScannerStrategy(Strategy):
         if symbol not in self._selected:
             self._selected.append(symbol)
 
-    def _active_symbols(self, context: StrategyContext) -> list[str]:
-        active = (self._universe or list(context.instruments))[: self._active_limit]
-        return list(active)
-
-    def scan_diagnostics(self, context: StrategyContext) -> None:
-        """Log scan status on live ticks before the first closed bar exists."""
-        if context.event.bar is not None:
-            return
-        symbol = context.event.symbol
-        if not symbol:
-            return
-        if self._universe and symbol not in self._universe[: self._active_limit]:
-            return
-        interval = context.interval
-        closes = context.market.closes(symbol)
-        need = self._required_history()
-        have = len(closes)
-        if have == 0:
-            self._queue_scan_log(
-                symbol,
-                f"live price tick, waiting for first closed {interval} candle",
-                check="await_closed_bar",
-                interval=interval,
-            )
-            return
-        if have < need:
-            self._queue_scan_log(
-                symbol,
-                f"warming up ({have}/{need} bars)",
-                check="warming_up",
-                bars=have,
-                required=need,
-            )
-
     def _evaluate_scan(
         self, symbol: str, context: StrategyContext
     ) -> tuple[str | None, dict]:
         """Return ``(reason, context)`` when the coin is being checked but not entering."""
-        if self._universe and symbol not in self._universe[: self._active_limit]:
-            return None, {}
-
         closes = context.market.closes(symbol)
         need = self._required_history()
         have = len(closes)
         if have < need:
             return (
-                f"warming up ({have}/{need} bars)",
-                {"check": "warming_up", "bars": have, "required": need},
+                f"not enough history ({have}/{need} bars)",
+                {"check": "insufficient_history", "bars": have, "required": need},
             )
 
         price = closes[-1]
@@ -291,7 +218,9 @@ class TrendScannerStrategy(Strategy):
         if fast is None or slow is None or trend is None or cur_rsi is None:
             return ("indicators not ready", {"check": "indicators"})
 
-        prev_rsi = self._prev_rsi.get(symbol, cur_rsi)
+        prev_rsi = rsi(closes[:-1], self.p.rsi_period)
+        if prev_rsi is None:
+            prev_rsi = cur_rsi
         ctx_base = {
             "price": str(price),
             "rsi": str(cur_rsi.quantize(Decimal("0.1"))),
@@ -380,31 +309,6 @@ class TrendScannerStrategy(Strategy):
         check = str(ctx.pop("check", "scan"))
         self._queue_scan_log(symbol, reason, check=check, **ctx)
 
-    def _maybe_scan_summary(self, context: StrategyContext) -> None:
-        self._bars_since_summary += 1
-        if self._bars_since_summary < self.p.scan_universe:
-            return
-        self._bars_since_summary = 0
-        counts: Counter[str] = Counter()
-        for sym in self._active_symbols(context):
-            reason, ctx = self._evaluate_scan(sym, context)
-            if reason is None:
-                counts["ready"] += 1
-            else:
-                counts[str(ctx.get("check", "other"))] += 1
-        if not counts:
-            return
-        parts = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
-        self._queue_scan_log(
-            "",
-            f"scan summary top {self._active_limit}: {parts}",
-            check="summary",
-            active_limit=self._active_limit,
-            selected=len(self._selected),
-            target=self.p.max_symbols,
-            counts=dict(counts),
-        )
-
     # ------------------------------------------------------------------ #
     # Take-profit / stop helpers
     # ------------------------------------------------------------------ #
@@ -446,11 +350,10 @@ class TrendScannerStrategy(Strategy):
         if bar is None:
             return []
         symbol = bar.symbol
-        if self._universe and symbol not in self._universe[: self._active_limit]:
-            return []
         closes = context.market.closes(symbol)
         need = self._required_history()
         if len(closes) < need:
+            self._record_scan(symbol, context)
             return []
 
         price = closes[-1]
@@ -461,8 +364,11 @@ class TrendScannerStrategy(Strategy):
         if fast is None or slow is None or trend is None or cur_rsi is None:
             return []
 
-        prev_rsi = self._prev_rsi.get(symbol, cur_rsi)
-        self._prev_rsi[symbol] = cur_rsi
+        # Compare against the RSI one bar ago, derived from history so a single
+        # evaluation (the one-by-one scan) detects the pullback turn correctly.
+        prev_rsi = rsi(closes[:-1], self.p.rsi_period)
+        if prev_rsi is None:
+            prev_rsi = cur_rsi
 
         long_regime = price > trend and fast > slow
         short_regime = price < trend and fast < slow
@@ -494,7 +400,6 @@ class TrendScannerStrategy(Strategy):
 
         if not intents:
             self._record_scan(symbol, context)
-            self._maybe_scan_summary(context)
 
         return intents
 
