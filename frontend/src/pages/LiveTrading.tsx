@@ -1,6 +1,6 @@
-// Live/dry trading view → the chart-centric trading workspace.
+// Live trading view: only live-mode trades.
 import TradingWorkspace from "@/pages/TradingWorkspace";
 
 export default function LiveTrading() {
-  return <TradingWorkspace />;
+  return <TradingWorkspace mode="live" />;
 }

@@ -13,12 +13,14 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.account.router import router as account_router
 from app.api.config.router import router as config_router
 from app.api.control.router import router as control_router
 from app.api.history.router import router as history_router
 from app.api.market.router import router as market_router
 from app.api.realtime.hub import RealtimeHub
 from app.api.realtime.router import router as realtime_router
+from app.api.system.router import router as system_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 
@@ -35,6 +37,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.hub = hub
     await hub.start()
 
+    # Background CPU/RAM sampler for the System Health page.
+    from app.services.metrics import start_sampler
+
+    metrics_task = start_sampler("backend-api")
+
     # Long-lived control producer for start/stop commands.
     app.state.control_producer = None
     with contextlib.suppress(Exception):
@@ -50,6 +57,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        metrics_task.cancel()
+        with contextlib.suppress(Exception):
+            await metrics_task
         await hub.stop()
         if app.state.control_producer is not None:
             await app.state.control_producer.stop()
@@ -77,6 +87,8 @@ def create_app() -> FastAPI:
     app.include_router(market_router, prefix="/api")
     app.include_router(config_router, prefix="/api")
     app.include_router(control_router, prefix="/api")
+    app.include_router(account_router, prefix="/api")
+    app.include_router(system_router, prefix="/api")
     app.include_router(realtime_router, prefix="/api/realtime")
     return app
 

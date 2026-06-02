@@ -30,6 +30,10 @@ async def run() -> None:
     await sink.start()
     manager = RunManager(sink)
 
+    from app.services.metrics import start_sampler
+
+    metrics_task = start_sampler("trading-worker")
+
     consumer = KafkaEventConsumer(
         [topics.control],
         settings.kafka_bootstrap_servers,
@@ -42,6 +46,9 @@ async def run() -> None:
         async for _topic, payload in consumer.messages():
             await _handle_command(manager, payload)
     finally:
+        metrics_task.cancel()
+        with contextlib.suppress(Exception):
+            await metrics_task
         with contextlib.suppress(Exception):
             await manager.shutdown()
         await consumer.stop()

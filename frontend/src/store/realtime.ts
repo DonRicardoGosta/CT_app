@@ -1,5 +1,9 @@
 // Zustand store holding the latest realtime state, fed by the WebSocket client.
 // Components read slices of this; the DB is never involved on this path.
+//
+// Events are bucketed by trading mode (live / dry_run / backtest) so the Live and
+// Dry pages stay fully separated. Cross-cutting consumers (Logs, Health) read the
+// combined feed arrays kept at the top level.
 
 import { create } from "zustand";
 import { realtime, type RealtimeEvent, type Status } from "@/lib/ws";
@@ -7,6 +11,9 @@ import { realtime, type RealtimeEvent, type Status } from "@/lib/ws";
 const MAX_FEED = 200;
 const MAX_CURVE = 1000;
 const MAX_LIVE_CANDLES = 1500;
+
+export type TradeMode = "live" | "dry_run" | "backtest";
+const MODES: TradeMode[] = ["live", "dry_run", "backtest"];
 
 export interface PositionRow {
   symbol: string;
@@ -55,8 +62,7 @@ export interface LiveCandle {
   c: number;
 }
 
-interface RealtimeState {
-  status: Status;
+export interface ModeBucket {
   positions: Record<string, PositionRow>;
   equity: RealtimeEvent | null;
   equityCurve: { ts: number; equity: number }[];
@@ -65,7 +71,6 @@ interface RealtimeState {
   signals: RealtimeEvent[];
   errors: RealtimeEvent[];
   runs: RealtimeEvent[];
-  // Trading workspace state
   watchlist: string[];
   watchScanning: string[];
   watchTarget: number;
@@ -74,10 +79,49 @@ interface RealtimeState {
   prices: Record<string, number>;
   tradeLevels: Record<string, TradeLevel>;
   symbolSummaries: Record<string, SymbolSummary>;
-  liveCandles: Record<string, LiveCandle[]>; // keyed by symbol (run interval)
+  liveCandles: Record<string, LiveCandle[]>;
+}
+
+interface RealtimeState {
+  status: Status;
+  // Most recent equity event across any mode (used by the global header badge).
+  lastEquity: RealtimeEvent | null;
+  byMode: Record<TradeMode, ModeBucket>;
+  // Combined (all-mode) feeds for the Logs and Health pages.
+  orders: RealtimeEvent[];
+  fills: RealtimeEvent[];
+  signals: RealtimeEvent[];
+  errors: RealtimeEvent[];
+  runs: RealtimeEvent[];
   setStatus: (s: Status) => void;
   ingest: (e: RealtimeEvent) => void;
   reset: () => void;
+}
+
+function emptyBucket(): ModeBucket {
+  return {
+    positions: {},
+    equity: null,
+    equityCurve: [],
+    fills: [],
+    orders: [],
+    signals: [],
+    errors: [],
+    runs: [],
+    watchlist: [],
+    watchScanning: [],
+    watchTarget: 0,
+    watchComplete: false,
+    watchInterval: "1m",
+    prices: {},
+    tradeLevels: {},
+    symbolSummaries: {},
+    liveCandles: {},
+  };
+}
+
+function emptyByMode(): Record<TradeMode, ModeBucket> {
+  return { live: emptyBucket(), dry_run: emptyBucket(), backtest: emptyBucket() };
 }
 
 function prepend(list: RealtimeEvent[], e: RealtimeEvent): RealtimeEvent[] {
@@ -98,136 +142,157 @@ function appendCandle(list: LiveCandle[] | undefined, e: RealtimeEvent): LiveCan
   return [...withoutSame, bar].sort((a, b) => a.t - b.t).slice(-MAX_LIVE_CANDLES);
 }
 
-const EMPTY_WORKSPACE = {
-  watchlist: [] as string[],
-  watchScanning: [] as string[],
-  watchTarget: 0,
-  watchComplete: false,
-  watchInterval: "1m",
-  prices: {} as Record<string, number>,
-  tradeLevels: {} as Record<string, TradeLevel>,
-  symbolSummaries: {} as Record<string, SymbolSummary>,
-  liveCandles: {} as Record<string, LiveCandle[]>,
-};
+function modeOf(e: RealtimeEvent): TradeMode {
+  const m = String(e.mode ?? "");
+  return (MODES as string[]).includes(m) ? (m as TradeMode) : "dry_run";
+}
+
+// Apply an event to a single mode bucket, returning a new bucket (or the same
+// reference when nothing relevant changed).
+function reduceBucket(b: ModeBucket, e: RealtimeEvent): ModeBucket {
+  switch (e.type) {
+    case "position": {
+      const key = `${e.symbol}|${e.position_side}`;
+      const positions = { ...b.positions };
+      if (parseFloat(String(e.qty)) <= 0) delete positions[key];
+      else positions[key] = e as unknown as PositionRow;
+      return { ...b, positions };
+    }
+    case "equity": {
+      const eq = parseFloat(String(e.equity));
+      const ts = new Date(String(e.ts)).getTime();
+      const curve = [...b.equityCurve, { ts, equity: eq }].slice(-MAX_CURVE);
+      return { ...b, equity: e, equityCurve: curve };
+    }
+    case "fill":
+      return { ...b, fills: prepend(b.fills, e) };
+    case "order":
+      return { ...b, orders: prepend(b.orders, e) };
+    case "signal":
+      return { ...b, signals: prepend(b.signals, e) };
+    case "error":
+      return { ...b, errors: prepend(b.errors, e) };
+    case "run":
+      return { ...b, runs: prepend(b.runs, e) };
+    case "market": {
+      const symbol = String(e.symbol ?? "");
+      const price = parseFloat(String(e.price));
+      if (!symbol || !isFinite(price)) return b;
+      return { ...b, prices: { ...b.prices, [symbol]: price } };
+    }
+    case "candle": {
+      const symbol = String(e.symbol ?? "");
+      if (!symbol) return b;
+      return {
+        ...b,
+        liveCandles: { ...b.liveCandles, [symbol]: appendCandle(b.liveCandles[symbol], e) },
+      };
+    }
+    case "trade_level": {
+      const symbol = String(e.symbol ?? "");
+      if (!symbol) return b;
+      const prev = b.tradeLevels[symbol] ?? { symbol };
+      const merged: TradeLevel = { ...prev };
+      for (const k of [
+        "position_side",
+        "current_price",
+        "planned_entry",
+        "actual_entry",
+        "take_profit",
+        "stop_loss",
+        "source",
+      ] as const) {
+        if (e[k] != null) (merged as any)[k] = String(e[k]);
+      }
+      if (Array.isArray(e.take_profits)) merged.take_profits = (e.take_profits as unknown[]).map(String);
+      if (Array.isArray(e.stops)) merged.stops = (e.stops as unknown[]).map(String);
+      return { ...b, tradeLevels: { ...b.tradeLevels, [symbol]: merged } };
+    }
+    case "watchlist": {
+      const symbols = (e.symbols as string[]) ?? [];
+      const scanning = (e.scanning as string[]) ?? [];
+      const target = Number(e.target ?? symbols.length);
+      return {
+        ...b,
+        watchlist: symbols,
+        watchScanning: scanning,
+        watchTarget: target,
+        watchComplete: Boolean(e.complete),
+        watchInterval: String(e.interval ?? "1m"),
+      };
+    }
+    case "symbol_summary": {
+      const symbol = String(e.symbol ?? "");
+      if (!symbol) return b;
+      return {
+        ...b,
+        symbolSummaries: { ...b.symbolSummaries, [symbol]: e as unknown as SymbolSummary },
+      };
+    }
+    default:
+      return b;
+  }
+}
+
+const COMBINED = new Set(["order", "fill", "signal", "error", "run"]);
 
 export const useRealtime = create<RealtimeState>((set) => ({
   status: "closed",
-  positions: {},
-  equity: null,
-  equityCurve: [],
-  fills: [],
+  lastEquity: null,
+  byMode: emptyByMode(),
   orders: [],
+  fills: [],
   signals: [],
   errors: [],
   runs: [],
-  ...EMPTY_WORKSPACE,
   setStatus: (s) => set({ status: s }),
   reset: () =>
     set({
-      positions: {},
-      equity: null,
-      equityCurve: [],
-      fills: [],
+      lastEquity: null,
+      byMode: emptyByMode(),
       orders: [],
+      fills: [],
       signals: [],
       errors: [],
       runs: [],
-      ...EMPTY_WORKSPACE,
     }),
   ingest: (e) =>
     set((state) => {
-      switch (e.type) {
-        case "position": {
-          const key = `${e.symbol}|${e.position_side}`;
-          const positions = { ...state.positions };
-          if (parseFloat(String(e.qty)) <= 0) delete positions[key];
-          else positions[key] = e as unknown as PositionRow;
-          return { positions };
-        }
-        case "equity": {
-          const eq = parseFloat(String(e.equity));
-          const ts = new Date(String(e.ts)).getTime();
-          const curve = [...state.equityCurve, { ts, equity: eq }].slice(-MAX_CURVE);
-          return { equity: e, equityCurve: curve };
-        }
-        case "fill":
-          return { fills: prepend(state.fills, e) };
-        case "order":
-          return { orders: prepend(state.orders, e) };
-        case "signal":
-          return { signals: prepend(state.signals, e) };
-        case "error":
-          return { errors: prepend(state.errors, e) };
-        case "run":
-          return { runs: prepend(state.runs, e) };
-        case "market": {
-          const symbol = String(e.symbol ?? "");
-          const price = parseFloat(String(e.price));
-          if (!symbol || !isFinite(price)) return {};
-          return { prices: { ...state.prices, [symbol]: price } };
-        }
-        case "candle": {
-          const symbol = String(e.symbol ?? "");
-          if (!symbol) return {};
-          return {
-            liveCandles: {
-              ...state.liveCandles,
-              [symbol]: appendCandle(state.liveCandles[symbol], e),
-            },
-          };
-        }
-        case "trade_level": {
-          const symbol = String(e.symbol ?? "");
-          if (!symbol) return {};
-          const prev = state.tradeLevels[symbol] ?? { symbol };
-          // Merge so a price-only update doesn't wipe entry/tp/sl.
-          const merged: TradeLevel = { ...prev };
-          for (const k of [
-            "position_side",
-            "current_price",
-            "planned_entry",
-            "actual_entry",
-            "take_profit",
-            "stop_loss",
-            "source",
-          ] as const) {
-            if (e[k] != null) (merged as any)[k] = String(e[k]);
-          }
-          if (Array.isArray(e.take_profits)) {
-            merged.take_profits = (e.take_profits as unknown[]).map(String);
-          }
-          if (Array.isArray(e.stops)) {
-            merged.stops = (e.stops as unknown[]).map(String);
-          }
-          return { tradeLevels: { ...state.tradeLevels, [symbol]: merged } };
-        }
-        case "watchlist": {
-          const symbols = (e.symbols as string[]) ?? [];
-          const scanning = (e.scanning as string[]) ?? [];
-          const target = Number(e.target ?? symbols.length);
-          return {
-            watchlist: symbols,
-            watchScanning: scanning,
-            watchTarget: target,
-            watchComplete: Boolean(e.complete),
-            watchInterval: String(e.interval ?? "1m"),
-          };
-        }
-        case "symbol_summary": {
-          const symbol = String(e.symbol ?? "");
-          if (!symbol) return {};
-          return {
-            symbolSummaries: {
-              ...state.symbolSummaries,
-              [symbol]: e as unknown as SymbolSummary,
-            },
-          };
-        }
-        default:
-          return {};
+      const mode = modeOf(e);
+      const bucket = reduceBucket(state.byMode[mode], e);
+      const patch: Partial<RealtimeState> = {};
+      if (bucket !== state.byMode[mode]) {
+        patch.byMode = { ...state.byMode, [mode]: bucket };
       }
+      if (e.type === "equity") patch.lastEquity = e;
+      // Mirror feed events into the combined arrays for Logs/Health.
+      if (COMBINED.has(e.type)) {
+        switch (e.type) {
+          case "order":
+            patch.orders = prepend(state.orders, e);
+            break;
+          case "fill":
+            patch.fills = prepend(state.fills, e);
+            break;
+          case "signal":
+            patch.signals = prepend(state.signals, e);
+            break;
+          case "error":
+            patch.errors = prepend(state.errors, e);
+            break;
+          case "run":
+            patch.runs = prepend(state.runs, e);
+            break;
+        }
+      }
+      return patch;
     }),
 }));
+
+// Hook: read a single mode's bucket.
+export function useMode(mode: TradeMode): ModeBucket {
+  return useRealtime((s) => s.byMode[mode]);
+}
 
 let wired = false;
 

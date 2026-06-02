@@ -7,7 +7,7 @@ rows. Query helpers back the history/config REST APIs.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -21,6 +21,7 @@ from app.db.models import (
     FillRecord,
     OrderRecord,
     PositionSnapshot,
+    ResourceMetric,
     Run,
     SignalRecord,
 )
@@ -253,6 +254,67 @@ async def list_errors(
         stmt = stmt.where(ErrorLog.severity == severity)
     res = await session.execute(stmt)
     return list(res.scalars().all())
+
+
+# --------------------------------------------------------------------------- #
+# Resource metrics (System Health CPU/RAM history)
+# --------------------------------------------------------------------------- #
+_RANGE_SECONDS = {
+    "15m": 15 * 60,
+    "1h": 60 * 60,
+    "6h": 6 * 60 * 60,
+    "24h": 24 * 60 * 60,
+}
+
+
+async def list_resource_metrics(
+    session: AsyncSession, *, range_key: str = "1h", limit: int = 20000
+) -> list[dict[str, Any]]:
+    """Return CPU/RAM samples within ``range_key`` grouped by service (ascending ts)."""
+    seconds = _RANGE_SECONDS.get(range_key, _RANGE_SECONDS["1h"])
+    since = datetime.now(UTC) - timedelta(seconds=seconds)
+    stmt = (
+        select(ResourceMetric)
+        .where(ResourceMetric.ts >= since)
+        .order_by(ResourceMetric.ts.asc())
+        .limit(limit)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    by_service: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        by_service.setdefault(r.service, []).append(
+            {
+                "ts": r.ts.isoformat(),
+                "cpu_pct": r.cpu_pct,
+                "mem_mb": r.mem_mb,
+                "mem_limit_mb": r.mem_limit_mb,
+            }
+        )
+    return [{"service": svc, "points": pts} for svc, pts in sorted(by_service.items())]
+
+
+async def latest_resource_metrics(session: AsyncSession) -> list[dict[str, Any]]:
+    """Return the most recent sample per service (last 5 minutes)."""
+    since = datetime.now(UTC) - timedelta(minutes=5)
+    stmt = (
+        select(ResourceMetric)
+        .where(ResourceMetric.ts >= since)
+        .order_by(ResourceMetric.ts.asc())
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    latest: dict[str, ResourceMetric] = {}
+    for r in rows:
+        latest[r.service] = r  # ascending ts -> last write wins
+    return [
+        {
+            "service": r.service,
+            "ts": r.ts.isoformat(),
+            "cpu_pct": r.cpu_pct,
+            "mem_mb": r.mem_mb,
+            "mem_limit_mb": r.mem_limit_mb,
+        }
+        for r in sorted(latest.values(), key=lambda x: x.service)
+    ]
 
 
 # --------------------------------------------------------------------------- #

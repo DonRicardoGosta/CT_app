@@ -124,6 +124,10 @@ export const endpoints = {
   },
   startRun: (b: unknown) => api.post<{ run_id: string; mode: string }>("/control/start", b),
   stopRun: (runId: string) => api.post<{ run_id: string }>(`/control/stop/${runId}`),
+  accountBalance: (apiKeyId?: number) =>
+    api.get<AccountBalance>(`/account/balance${apiKeyId != null ? `?api_key_id=${apiKeyId}` : ""}`),
+  systemMetrics: (range: string) => api.get<MetricSeries[]>(`/system/metrics?range=${range}`),
+  systemStatus: () => api.get<MetricSnapshot[]>("/system/status"),
   klines: (args: { symbol: string; interval: string; limit?: number }) => {
     const params = new URLSearchParams({ symbol: args.symbol, interval: args.interval });
     if (args.limit) params.set("limit", String(args.limit));
@@ -138,4 +142,34 @@ export interface Kline {
   l: string;
   c: string;
   v: string;
+}
+
+export interface AccountBalance {
+  margin_coin: string;
+  balance: string | null;
+  available: string | null;
+  margin: string | null;
+  unrealized_pnl: string | null;
+  equity: string | null;
+  raw: Record<string, unknown>;
+}
+
+export interface MetricPoint {
+  ts: string;
+  cpu_pct: number;
+  mem_mb: number;
+  mem_limit_mb: number | null;
+}
+
+export interface MetricSeries {
+  service: string;
+  points: MetricPoint[];
+}
+
+export interface MetricSnapshot {
+  service: string;
+  ts: string;
+  cpu_pct: number;
+  mem_mb: number;
+  mem_limit_mb: number | null;
 }

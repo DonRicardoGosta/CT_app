@@ -14,6 +14,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Float,
     Index,
     Integer,
     Numeric,
@@ -209,6 +210,24 @@ class EquitySnapshot(Base):
     open_positions: Mapped[int] = mapped_column(Integer, default=0)
 
     __table_args__ = (Index("ix_equity_run_ts", "run_id", "ts"),)
+
+
+class ResourceMetric(Base):
+    """CPU/RAM samples per service, for the System Health history charts."""
+
+    __tablename__ = "resource_metrics"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    service: Mapped[str] = mapped_column(String(32), nullable=False)
+    cpu_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    mem_mb: Mapped[float] = mapped_column(Float, default=0.0)
+    mem_limit_mb: Mapped[float | None] = mapped_column(Float)
+
+    __table_args__ = (
+        Index("ix_resource_ts", "ts"),
+        Index("ix_resource_service_ts", "service", "ts"),
+    )
 
 
 class ErrorLog(Base):

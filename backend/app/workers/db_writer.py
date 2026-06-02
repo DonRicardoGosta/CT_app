@@ -50,6 +50,10 @@ async def run() -> None:
     buffer: list[BaseEvent] = []
     last_flush = asyncio.get_event_loop().time()
     log.info("db_writer_started")
+
+    from app.services.metrics import start_sampler
+
+    metrics_task = start_sampler("db-writer")
     try:
         async for _topic, payload in consumer.messages():
             event = parse_event(payload)
@@ -60,6 +64,9 @@ async def run() -> None:
                 await _flush(buffer)
                 last_flush = now
     finally:
+        metrics_task.cancel()
+        with contextlib.suppress(Exception):
+            await metrics_task
         with contextlib.suppress(Exception):
             await _flush(buffer)
         await consumer.stop()

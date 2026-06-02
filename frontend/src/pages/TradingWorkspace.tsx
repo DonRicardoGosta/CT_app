@@ -7,7 +7,7 @@ import BigChart, { type Candle, type ChartLevels } from "@/components/BigChart";
 import MiniCoinCard from "@/components/MiniCoinCard";
 import IntervalSelector, { type Interval } from "@/components/IntervalSelector";
 import PositionPanel from "@/components/PositionPanel";
-import { useRealtime } from "@/store/realtime";
+import { useMode, useRealtime, type TradeMode } from "@/store/realtime";
 import { endpoints } from "@/lib/api";
 import { Badge, Card, CardTitle, Empty, Table, Td, Tr } from "@/components/ui";
 import { num, pnlClass, time, usd } from "@/lib/format";
@@ -18,9 +18,10 @@ function num0(v: unknown): number {
   return parseFloat(String(v ?? ""));
 }
 
-export default function TradingWorkspace() {
+export default function TradingWorkspace({ mode = "live" }: { mode?: TradeMode }) {
+  const status = useRealtime((s) => s.status);
+  const bucket = useMode(mode);
   const {
-    status,
     watchlist,
     watchScanning,
     watchTarget,
@@ -34,7 +35,7 @@ export default function TradingWorkspace() {
     orders,
     fills,
     signals,
-  } = useRealtime();
+  } = bucket;
 
   // Selected (tradeable) coins. Fall back to whatever we've seen if a strategy
   // does not publish a watchlist.

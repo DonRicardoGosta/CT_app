@@ -2,6 +2,7 @@ import { Route, Routes } from "react-router-dom";
 import Layout from "@/components/Layout";
 import Dashboard from "@/pages/Dashboard";
 import LiveTrading from "@/pages/LiveTrading";
+import DryTrading from "@/pages/DryTrading";
 import Strategies from "@/pages/Strategies";
 import Risk from "@/pages/Risk";
 import Backtest from "@/pages/Backtest";
@@ -16,6 +17,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Dashboard />} />
         <Route path="/live" element={<LiveTrading />} />
+        <Route path="/dry" element={<DryTrading />} />
         <Route path="/strategies" element={<Strategies />} />
         <Route path="/risk" element={<Risk />} />
         <Route path="/backtest" element={<Backtest />} />

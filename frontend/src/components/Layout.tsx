@@ -5,6 +5,7 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
+  Beaker,
   Boxes,
   FlaskConical,
   Gauge,
@@ -22,6 +23,7 @@ import { usd } from "@/lib/format";
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
   { to: "/live", label: "Live Trading", icon: Activity },
+  { to: "/dry", label: "Dry Trading", icon: Beaker },
   { to: "/strategies", label: "Strategies", icon: Boxes },
   { to: "/risk", label: "Risk & Capital", icon: ShieldHalf },
   { to: "/backtest", label: "Backtest", icon: FlaskConical },
@@ -54,7 +56,7 @@ async function panicStopAll() {
 
 export default function Layout({ children }: { children: ReactNode }) {
   const status = useRealtime((s) => s.status);
-  const equity = useRealtime((s) => s.equity);
+  const equity = useRealtime((s) => s.lastEquity);
   const location = useLocation();
 
   return (
