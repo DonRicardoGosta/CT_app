@@ -16,6 +16,7 @@ from app.domain.types import Mode, PositionSide
 from app.events.bus import InMemorySink
 from app.events.schemas import (
     CandleEvent,
+    ErrorEvent,
     MarketPriceEvent,
     SymbolSummaryEvent,
     TradeLevelEvent,
@@ -72,6 +73,10 @@ async def test_workspace_events_emitted(bars, instruments):
     # At least one level carries a take-profit and a stop-loss price.
     assert any(lvl.take_profit is not None for lvl in levels)
     assert any(lvl.stop_loss is not None for lvl in levels)
+
+    logs = of(ErrorEvent)
+    assert any(log.severity == "info" and log.source == "engine" for log in logs)
+    assert any(log.message == "watchlist selected" for log in logs)
 
 
 def test_take_profit_price_uses_leverage(instruments):

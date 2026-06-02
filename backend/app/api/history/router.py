@@ -54,3 +54,24 @@ async def get_errors(
     session: AsyncSession = Depends(get_session),
 ):
     return rows_to_list(await repo.list_errors(session, source, severity, limit))
+
+
+@router.get("/logs")
+async def get_logs(
+    run_id: str | None = None,
+    mode: str | None = None,
+    severity: str | None = None,
+    source: str | None = None,
+    q: str | None = None,
+    limit: int = Query(500, le=5000),
+    session: AsyncSession = Depends(get_session),
+):
+    return await repo.list_log_entries(
+        session,
+        run_id=run_id,
+        mode=mode,
+        severity=severity,
+        source=source,
+        q=q,
+        limit=limit,
+    )

@@ -6,6 +6,8 @@ and strategy code below this layer are mode-agnostic (REQ-001/003).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from app.core.logging import get_logger
 from app.domain.brokers.live import LiveBroker
 from app.domain.brokers.sim import SimBroker
@@ -16,12 +18,34 @@ from app.domain.feeds.live import LiveFeed
 from app.domain.interfaces import Broker, MarketDataFeed
 from app.domain.types import Instrument, Mode
 from app.events.bus import EventSink
+from app.events.schemas import ErrorEvent
 from app.exchange.bitunix.rest import BitunixRest
 from app.risk.sizer import RiskSizer
 from app.services.run_config import RunConfig
 from app.strategies import create_strategy
 
 log = get_logger(__name__)
+
+
+async def _emit_builder_log(
+    sink: EventSink,
+    config: RunConfig,
+    severity: str,
+    message: str,
+    *,
+    context: dict | None = None,
+) -> None:
+    await sink.emit(
+        ErrorEvent(
+            run_id=config.run_id,
+            mode=str(config.mode),
+            ts=datetime.now(UTC),
+            source="builder",
+            severity=severity,
+            message=message,
+            context=context or {},
+        )
+    )
 
 
 def _resolve_symbols(
@@ -50,9 +74,22 @@ async def build_engine(
         instruments = await rest.get_trading_pairs(config.symbols or None)
     except Exception as exc:  # noqa: BLE001 - fall back to an empty universe
         log.warning("trading_pairs_fetch_failed", error=str(exc))
+        await _emit_builder_log(
+            sink,
+            config,
+            "warn",
+            f"trading pairs fetch failed: {exc}",
+        )
         instruments = {}
 
     symbols = _resolve_symbols(config, strategy, instruments)
+    await _emit_builder_log(
+        sink,
+        config,
+        "info",
+        "symbols resolved",
+        context={"symbols": symbols, "interval": config.interval},
+    )
 
     clock: Clock
     feed: MarketDataFeed
@@ -67,7 +104,22 @@ async def build_engine(
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("kline_fetch_failed", symbol=sym, error=str(exc))
+                await _emit_builder_log(
+                    sink,
+                    config,
+                    "warn",
+                    f"kline fetch failed for {sym}: {exc}",
+                    context={"symbol": sym, "interval": config.interval},
+                )
         bars = merge_bars_by_time(per_symbol)
+        if not bars:
+            await _emit_builder_log(
+                sink,
+                config,
+                "error",
+                "backtest loaded zero bars",
+                context={"symbols": symbols, "interval": config.interval},
+            )
         start = bars[0].open_time if bars else config.backtest_start
         sim_clock = SimulatedClock(start) if start else SimulatedClock(_epoch())
         clock = sim_clock

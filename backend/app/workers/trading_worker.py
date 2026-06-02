@@ -53,15 +53,45 @@ async def _handle_command(manager: RunManager, payload: dict) -> None:
         command = ControlCommand.model_validate(payload)
     except Exception as exc:  # noqa: BLE001
         log.warning("bad_control_command", error=str(exc))
+        await manager.emit_log(
+            run_id="system",
+            mode="system",
+            source="trading_worker",
+            severity="error",
+            message=f"bad control command: {exc}",
+            context={"payload": payload},
+        )
         return
     if command.action == "start" and command.config is not None:
+        await manager.emit_log(
+            run_id=command.config.run_id,
+            mode=str(command.config.mode),
+            source="trading_worker",
+            severity="info",
+            message="control start received",
+            context={"strategy": command.config.strategy, "symbols": command.config.symbols},
+        )
         await manager.start(
             command.config, api_key=command.api_key, secret_key=command.secret_key
         )
     elif command.action == "stop" and command.run_id:
+        await manager.emit_log(
+            run_id=command.run_id,
+            mode="system",
+            source="trading_worker",
+            severity="warn",
+            message="control stop received",
+        )
         manager.stop(command.run_id)
     else:
         log.warning("unknown_control_action", action=command.action)
+        await manager.emit_log(
+            run_id=command.run_id or "system",
+            mode="system",
+            source="trading_worker",
+            severity="warn",
+            message=f"unknown control action: {command.action}",
+        )
 
 
 def main() -> None:

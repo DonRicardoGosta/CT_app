@@ -73,6 +73,27 @@ export interface RunRow {
   summary: Record<string, unknown>;
 }
 
+export interface LogRow {
+  ts: string;
+  severity: "debug" | "info" | "warn" | "warning" | "error" | "critical" | string;
+  source: string;
+  message: string;
+  run_id?: string | null;
+  mode?: string | null;
+  symbol?: string | null;
+  kind: string;
+  context: Record<string, unknown>;
+}
+
+export interface LogFilters {
+  runId?: string;
+  mode?: string;
+  severity?: string;
+  source?: string;
+  q?: string;
+  limit?: number;
+}
+
 export const endpoints = {
   strategies: () => api.get<StrategySchemas>("/config/strategies"),
   apiKeys: () => api.get<ApiKeyPublic[]>("/config/api-keys"),
@@ -90,6 +111,17 @@ export const endpoints = {
   fills: (runId?: string) => api.get<any[]>(`/history/fills${runId ? `?run_id=${runId}` : ""}`),
   equity: (runId: string) => api.get<any[]>(`/history/equity?run_id=${runId}`),
   errors: () => api.get<any[]>("/history/errors"),
+  logs: (filters: LogFilters = {}) => {
+    const params = new URLSearchParams();
+    if (filters.runId) params.set("run_id", filters.runId);
+    if (filters.mode) params.set("mode", filters.mode);
+    if (filters.severity) params.set("severity", filters.severity);
+    if (filters.source) params.set("source", filters.source);
+    if (filters.q) params.set("q", filters.q);
+    if (filters.limit) params.set("limit", String(filters.limit));
+    const query = params.toString();
+    return api.get<LogRow[]>(`/history/logs${query ? `?${query}` : ""}`);
+  },
   startRun: (b: unknown) => api.post<{ run_id: string; mode: string }>("/control/start", b),
   stopRun: (runId: string) => api.post<{ run_id: string }>(`/control/stop/${runId}`),
   klines: (args: { symbol: string; interval: string; limit?: number }) => {

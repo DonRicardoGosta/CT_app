@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from app.core.logging import get_logger
 from app.domain.clock import Clock
@@ -110,6 +112,12 @@ class Engine:
             run_id=self.run_id, mode=self.mode.value, strategy=self.strategy.name
         )
         await self._emit_run("started")
+        await self._emit_log(
+            "engine",
+            "info",
+            f"engine started: {self.strategy.name} ({self.mode.value})",
+            context={"strategy": self.strategy.name},
+        )
         started = False
         try:
             async for event in self.feed.stream():
@@ -119,7 +127,27 @@ class Engine:
                     await self._on_start(event, instruments)
                     started = True
                 await self._handle_event(event, instruments, summary)
+            if self.mode is Mode.BACKTEST and summary.events == 0:
+                await self._emit_log(
+                    "engine",
+                    "error",
+                    "no market events processed; check symbols, date range "
+                    "and exchange connectivity",
+                    context={"mode": self.mode.value},
+                )
             await self._finalize(summary)
+            await self._emit_log(
+                "engine",
+                "info",
+                "engine finished: "
+                f"events={summary.events} orders={summary.orders} fills={summary.fills}",
+                context={
+                    "events": summary.events,
+                    "orders": summary.orders,
+                    "fills": summary.fills,
+                    "rejected": summary.rejected,
+                },
+            )
             await self._emit_run("finished")
         except Exception as exc:  # noqa: BLE001 - report then re-raise
             await self._emit_error("engine", str(exc))
@@ -142,6 +170,12 @@ class Engine:
             self._interval = event.bar.interval
         self._watch_symbols = self.strategy.desired_symbols(instruments)
         await self._emit_watchlist()
+        await self._emit_log(
+            "engine",
+            "info",
+            "watchlist selected",
+            context={"symbols": self._watch_symbols, "interval": self._interval},
+        )
         for sym in self._watch_symbols:
             await self._emit_symbol_summary(sym, status="scanning")
 
@@ -179,6 +213,19 @@ class Engine:
         # 3-4) size + submit each intent
         for intent in intents:
             await self._emit_signal(intent)
+            await self._emit_log(
+                "signal",
+                "info",
+                f"signal {intent.action.value}: {intent.side.value} {intent.symbol}",
+                context={
+                    "symbol": intent.symbol,
+                    "side": intent.side.value,
+                    "action": intent.action.value,
+                    "position_side": intent.position_side.value,
+                    "reason": intent.reason,
+                    "tag": intent.tag,
+                },
+            )
             instrument = instruments.get(intent.symbol)
             if instrument is None:
                 await self._emit_error("sizer", f"unknown instrument {intent.symbol}")
@@ -204,6 +251,21 @@ class Engine:
                 continue
             order = await self.broker.submit(result.request)
             await self._emit_order(order)
+            await self._emit_log(
+                "order",
+                "info",
+                f"order {order.status.value}: {order.side.value} {order.symbol} qty={order.qty}",
+                context={
+                    "order_id": order.id,
+                    "symbol": order.symbol,
+                    "side": order.side.value,
+                    "position_side": order.position_side.value,
+                    "qty": order.qty,
+                    "leverage": order.leverage,
+                    "reason": order.reason,
+                    "tag": order.tag,
+                },
+            )
             summary.orders += 1
             if order.status is not OrderStatus.FILLED:
                 await self._emit_symbol_summary(order.symbol, status="pending_order")
@@ -211,6 +273,21 @@ class Engine:
                 summary.fills += len(order.fills)
                 for fill in order.fills:
                     await self._emit_fill(fill)
+                    await self._emit_log(
+                        "fill",
+                        "info",
+                        f"fill {fill.side.value}: {fill.symbol} qty={fill.qty} @ {fill.price}",
+                        context={
+                            "order_id": fill.order_id,
+                            "symbol": fill.symbol,
+                            "side": fill.side.value,
+                            "position_side": fill.position_side.value,
+                            "qty": fill.qty,
+                            "price": fill.price,
+                            "fee": fill.fee,
+                            "realized_pnl": fill.realized_pnl,
+                        },
+                    )
                 await self._emit_positions_for(order.symbol)
                 entry = order.avg_fill_price or price
                 await self._emit_trade_level(
@@ -393,16 +470,11 @@ class Engine:
         return price * (Decimal(1) - move)
 
     async def _emit_signal_rejection(self, intent, reason: str) -> None:
-        await self.sink.emit(
-            ErrorEvent(
-                run_id=self.run_id,
-                mode=self.mode.value,
-                ts=self.clock.now(),
-                source="risk",
-                severity="info",
-                message=f"intent rejected: {reason}",
-                context={"symbol": intent.symbol, "tag": intent.tag},
-            )
+        await self._emit_log(
+            "risk",
+            "warn",
+            f"intent rejected: {reason}",
+            context={"symbol": intent.symbol, "tag": intent.tag},
         )
 
     async def _emit_order(self, order: Order) -> None:
@@ -491,15 +563,41 @@ class Engine:
         if track is not None:
             track.equity_curve.append((ts.isoformat(), equity))
 
-    async def _emit_error(self, source: str, message: str, detail: str = "") -> None:
+    def _log_context(self, context: dict[str, Any] | None) -> dict[str, Any]:
+        def convert(value: Any) -> Any:
+            if isinstance(value, Decimal):
+                return str(value)
+            if isinstance(value, datetime):
+                return value.isoformat()
+            if isinstance(value, dict):
+                return {k: convert(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [convert(v) for v in value]
+            return value
+
+        return convert(context or {})
+
+    async def _emit_log(
+        self,
+        source: str,
+        severity: str,
+        message: str,
+        *,
+        detail: str = "",
+        context: dict[str, Any] | None = None,
+    ) -> None:
         await self.sink.emit(
             ErrorEvent(
                 run_id=self.run_id,
                 mode=self.mode.value,
                 ts=self.clock.now(),
                 source=source,
-                severity="error",
+                severity=severity,
                 message=message,
                 detail=detail,
+                context=self._log_context(context),
             )
         )
+
+    async def _emit_error(self, source: str, message: str, detail: str = "") -> None:
+        await self._emit_log(source, "error", message, detail=detail)
