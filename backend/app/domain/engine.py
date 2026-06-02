@@ -642,19 +642,47 @@ class Engine:
             )
 
     async def _fetch_history(self, symbol: str, count: int) -> list[Bar]:
+        """Fetch ``count`` recent bars, retrying with a wider request when short.
+
+        Illiquid coins skip minutes, so a first fetch can return fewer bars than
+        the strategy needs. We retry with progressively larger requests (which the
+        REST client turns into wider time windows) before giving up on the coin.
+        """
         if self._history is None:
             return []
-        try:
-            bars = await self._history.get_recent_klines(symbol, self._interval, count)
-        except Exception as exc:  # noqa: BLE001 - skip coins we can't fetch
-            await self._emit_log(
-                "strategy",
-                "warn",
-                f"scan {symbol}: history fetch failed: {exc}",
-                context={"symbol": symbol, "check": "fetch_failed"},
-            )
-            return []
-        return list(bars)
+        bars: list[Bar] = []
+        request = count
+        for attempt in range(3):
+            try:
+                fetched = await self._history.get_recent_klines(
+                    symbol, self._interval, request
+                )
+            except Exception as exc:  # noqa: BLE001 - skip coins we can't fetch
+                await self._emit_log(
+                    "strategy",
+                    "warn",
+                    f"scan {symbol}: history fetch failed: {exc}",
+                    context={"symbol": symbol, "check": "fetch_failed"},
+                )
+                return list(bars)
+            bars = list(fetched)
+            if len(bars) >= count:
+                return bars
+            # Got fewer than needed; ask for more (the client widens the window).
+            if attempt < 2:
+                await self._emit_log(
+                    "strategy",
+                    "info",
+                    f"scan {symbol}: only {len(bars)}/{count} bars, refetching more",
+                    context={
+                        "symbol": symbol,
+                        "have": len(bars),
+                        "need": count,
+                        "check": "history_refetch",
+                    },
+                )
+                request = count * 2 * (attempt + 2)
+        return bars
 
     async def _finalize(self, summary: EngineSummary) -> None:
         account = await self.broker.account()

@@ -331,6 +331,58 @@ class _FakeHistory:
         return self.series.get(symbol, [])
 
 
+class _ShortThenFullHistory:
+    """Returns too few bars until the requested ``count`` reaches a threshold."""
+
+    def __init__(self, short: int, full: int, threshold: int) -> None:
+        self.short = short
+        self.full = full
+        self.threshold = threshold
+        self.requested: list[int] = []
+
+    async def get_recent_klines(self, symbol: str, interval: str, count: int):
+        self.requested.append(count)
+        n = self.full if count >= self.threshold else self.short
+        return _flat_bars(symbol, n)
+
+
+def _make_engine(strategy, history):
+    from app.domain.clock import RealClock
+    from app.domain.feeds.live import LiveFeed
+
+    instruments = _multi_instruments(1)
+    clock = RealClock()
+    sizer = RiskSizer(RiskParams(base_leverage=5))
+    broker = SimBroker(clock, instruments, Decimal("1000"), fee_rate=Decimal("0.0006"))
+    feed = LiveFeed([], instruments, "1m")
+    return Engine(
+        mode=Mode.DRY_RUN,
+        strategy=strategy,
+        sizer=sizer,
+        broker=broker,
+        feed=feed,
+        clock=clock,
+        sink=InMemorySink(),
+        history=history,
+        interval="1m",
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_history_refetches_when_short():
+    strat = create_strategy("trend_scanner", {})
+    history = _ShortThenFullHistory(short=199, full=211, threshold=300)
+    engine = _make_engine(strat, history)
+
+    bars = await engine._fetch_history("BTCUSDT", 211)
+
+    # First request (211) returned only 199, so the engine retried with a larger
+    # count and got the full series.
+    assert len(bars) == 211
+    assert history.requested[0] == 211
+    assert history.requested[-1] >= 300
+
+
 def _bars_from_prices(symbol: str, prices: list[float]) -> list[Bar]:
     out = []
     for i, price in enumerate(prices):

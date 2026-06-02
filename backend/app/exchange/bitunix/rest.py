@@ -175,12 +175,34 @@ class BitunixRest:
     async def get_recent_klines(
         self, symbol: str, interval: str = "1m", count: int = 200
     ) -> list[Bar]:
-        """Fetch the most recent ``count`` closed bars (paginating past 200)."""
+        """Fetch the most recent ``count`` closed bars.
+
+        Illiquid coins skip minutes (no trades -> no candle), so a window sized to
+        exactly ``count`` periods returns fewer bars than requested. We grow the
+        lookback window and re-query until we have ``count`` bars or the exchange
+        clearly has no more history.
+        """
         if count <= 200:
-            return await self.get_klines(symbol, interval, count)
+            bars = await self.get_klines(symbol, interval, count)
+            if len(bars) >= count:
+                return bars[-count:]
+            # Short result (gaps / fresh listing): fall through to a wider range query.
+
         seconds = _INTERVAL_SECONDS.get(interval, 60)
-        start = datetime.now(UTC) - timedelta(seconds=seconds * (count + 5))
-        bars = await self._get_klines_range(symbol, interval, start, None)
+        bars: list[Bar] = []
+        # Start with a 2x margin, then double the window each retry (2x, 4x, 8x...).
+        span = max(count * 2, count + 50)
+        prev_len = -1
+        for _ in range(6):
+            start = datetime.now(UTC) - timedelta(seconds=seconds * (span + 5))
+            bars = await self._get_klines_range(symbol, interval, start, None)
+            if len(bars) >= count:
+                break
+            # No progress despite a wider window -> exchange has no more history.
+            if len(bars) == prev_len:
+                break
+            prev_len = len(bars)
+            span *= 2
         return bars[-count:]
 
     async def _get_klines_range(
