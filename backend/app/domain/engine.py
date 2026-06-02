@@ -25,22 +25,28 @@ from app.domain.interfaces import Broker, MarketDataFeed
 from app.domain.market import MarketState
 from app.domain.types import (
     AccountState,
+    Bar,
     Instrument,
     MarketEvent,
     MarketEventType,
     Mode,
     Order,
     OrderStatus,
+    PositionSide,
 )
 from app.events.bus import EventSink
 from app.events.schemas import (
+    CandleEvent,
     EquityEvent,
     ErrorEvent,
     FillEvent,
+    MarketPriceEvent,
     OrderEvent,
     PositionEvent,
     RunEvent,
     SignalEvent,
+    SymbolSummaryEvent,
+    TradeLevelEvent,
 )
 from app.risk.sizer import RiskSizer
 from app.strategies.base import Strategy, StrategyContext
@@ -144,6 +150,9 @@ class Engine:
         else:
             self.market.update_price(event.symbol, event.price)
         await self.broker.set_mark(event.symbol, event.price)
+        await self._emit_market(event)
+        if event.type is MarketEventType.BAR and event.bar is not None:
+            await self._emit_candle(event.bar)
 
         # 2) strategy decision (pure)
         account = await self.broker.account()
@@ -158,12 +167,21 @@ class Engine:
 
         # 3-4) size + submit each intent
         for intent in intents:
-            await self._emit_signal(intent)
+            price = self.market.last_price(intent.symbol)
+            await self._emit_signal(intent, price)
+            await self._emit_trade_level(
+                symbol=intent.symbol,
+                position_side=intent.position_side.value,
+                current_price=price,
+                planned_entry=price,
+                stop_loss=intent.stop_price,
+                take_profit=self._take_profit_price(price, intent.position_side),
+                source="strategy",
+            )
             instrument = instruments.get(intent.symbol)
             if instrument is None:
                 await self._emit_error("sizer", f"unknown instrument {intent.symbol}")
                 continue
-            price = self.market.last_price(intent.symbol)
             if price is None:
                 continue
             account = await self.broker.account()  # refresh between intents
@@ -174,6 +192,21 @@ class Engine:
                 continue
             order = await self.broker.submit(result.request)
             await self._emit_order(order)
+            await self._emit_trade_level(
+                symbol=order.symbol,
+                position_side=order.position_side.value,
+                current_price=self.market.last_price(order.symbol),
+                planned_entry=order.price or self.market.last_price(order.symbol),
+                actual_entry=order.avg_fill_price if order.filled_qty else None,
+                stop_loss=result.request.stop_price,
+                take_profit=self._take_profit_price(
+                    order.avg_fill_price or self.market.last_price(order.symbol),
+                    order.position_side,
+                ),
+                source="order",
+            )
+            if order.status is not OrderStatus.FILLED:
+                await self._emit_symbol_summary(order.symbol, status="pending_order")
             summary.orders += 1
             if order.status is OrderStatus.FILLED:
                 summary.fills += len(order.fills)
@@ -196,6 +229,110 @@ class Engine:
     # ------------------------------------------------------------------ #
     # Emitters (all go through the event bus; never the DB)
     # ------------------------------------------------------------------ #
+    async def _emit_market(self, event: MarketEvent) -> None:
+        await self.sink.emit(
+            MarketPriceEvent(
+                run_id=self.run_id,
+                mode=self.mode.value,
+                ts=event.ts,
+                symbol=event.symbol,
+                price=event.price,
+            )
+        )
+
+    async def _emit_candle(self, bar: Bar) -> None:
+        await self.sink.emit(
+            CandleEvent(
+                run_id=self.run_id,
+                mode=self.mode.value,
+                ts=self.clock.now(),
+                symbol=bar.symbol,
+                interval=bar.interval,
+                open_time=bar.open_time,
+                open=bar.open,
+                high=bar.high,
+                low=bar.low,
+                close=bar.close,
+                volume=bar.volume,
+                closed=True,
+            )
+        )
+
+    async def _emit_trade_level(
+        self,
+        *,
+        symbol: str,
+        position_side: str | None = None,
+        current_price: Decimal | None = None,
+        planned_entry: Decimal | None = None,
+        actual_entry: Decimal | None = None,
+        take_profit: Decimal | None = None,
+        stop_loss: Decimal | None = None,
+        liquidation_price: Decimal | None = None,
+        source: str = "engine",
+    ) -> None:
+        await self.sink.emit(
+            TradeLevelEvent(
+                run_id=self.run_id,
+                mode=self.mode.value,
+                ts=self.clock.now(),
+                symbol=symbol,
+                position_side=position_side,
+                current_price=current_price,
+                planned_entry=planned_entry,
+                actual_entry=actual_entry,
+                take_profit=take_profit,
+                stop_loss=stop_loss,
+                liquidation_price=liquidation_price,
+                source=source,
+            )
+        )
+
+    async def _emit_symbol_summary(
+        self, symbol: str, *, status: str | None = None, last_signal_reason: str = ""
+    ) -> None:
+        account = await self.broker.account()
+        marks = self.market.marks()
+        mark = marks.get(symbol)
+        positions = [pos for (sym, _side), pos in account.positions.items() if sym == symbol]
+        pos = positions[0] if positions else None
+        last_price = mark or (pos.entry_price if pos is not None else None)
+        await self.sink.emit(
+            SymbolSummaryEvent(
+                run_id=self.run_id,
+                mode=self.mode.value,
+                ts=self.clock.now(),
+                symbol=symbol,
+                status=status or ("in_position" if pos is not None and pos.qty > 0 else "scanning"),
+                last_price=last_price,
+                position_side=pos.position_side.value if pos is not None else None,
+                unrealized_pnl=pos.unrealized_pnl(last_price)
+                if pos is not None and last_price is not None
+                else None,
+                realized_pnl=pos.realized_pnl if pos is not None else None,
+                step_count=pos.step_count if pos is not None else None,
+                max_steps=self._max_steps(),
+                last_signal_reason=last_signal_reason,
+            )
+        )
+
+    def _max_steps(self) -> int | None:
+        steps = getattr(self.strategy.params, "ladder_steps", None)
+        return int(steps) if steps is not None else None
+
+    def _take_profit_price(
+        self, price: Decimal | None, position_side: PositionSide
+    ) -> Decimal | None:
+        if price is None:
+            return None
+        pct = getattr(self.strategy.params, "take_profit_pct", None)
+        if pct is None:
+            return None
+        pct_decimal = Decimal(str(pct)) / Decimal(100)
+        if position_side is PositionSide.LONG:
+            return price * (Decimal(1) + pct_decimal)
+        return price * (Decimal(1) - pct_decimal)
+
     async def _emit_run(self, status: str, detail: str = "") -> None:
         await self.sink.emit(
             RunEvent(
@@ -208,7 +345,8 @@ class Engine:
             )
         )
 
-    async def _emit_signal(self, intent) -> None:
+    async def _emit_signal(self, intent, price: Decimal | None = None) -> None:
+        take_profit = self._take_profit_price(price, intent.position_side)
         await self.sink.emit(
             SignalEvent(
                 run_id=self.run_id,
@@ -221,7 +359,13 @@ class Engine:
                 weight=intent.weight,
                 reason=intent.reason,
                 tag=intent.tag,
+                planned_entry=price,
+                stop_loss=intent.stop_price,
+                take_profit=take_profit,
             )
+        )
+        await self._emit_symbol_summary(
+            intent.symbol, status="signal", last_signal_reason=intent.reason
         )
 
     async def _emit_signal_rejection(self, intent, reason: str) -> None:
@@ -302,6 +446,15 @@ class Engine:
                     step_count=pos.step_count,
                 )
             )
+            await self._emit_trade_level(
+                symbol=sym,
+                position_side=side.value,
+                current_price=mark,
+                actual_entry=pos.entry_price,
+                take_profit=self._take_profit_price(pos.entry_price, side),
+                source="position",
+            )
+            await self._emit_symbol_summary(sym, status="in_position")
 
     async def _emit_equity(self, track: EngineSummary | None = None) -> None:
         account: AccountState = await self.broker.account()

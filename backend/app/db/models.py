@@ -187,6 +187,9 @@ class SignalRecord(Base):
     weight: Mapped[Decimal] = mapped_column(NUM, default=Decimal("1"))
     reason: Mapped[str] = mapped_column(Text, default="")
     tag: Mapped[str] = mapped_column(String(64), default="")
+    planned_entry: Mapped[Decimal | None] = mapped_column(NUM)
+    stop_loss: Mapped[Decimal | None] = mapped_column(NUM)
+    take_profit: Mapped[Decimal | None] = mapped_column(NUM)
 
     __table_args__ = (
         Index("ix_signals_run_ts", "run_id", "ts"),
@@ -209,6 +212,76 @@ class EquitySnapshot(Base):
     open_positions: Mapped[int] = mapped_column(Integer, default=0)
 
     __table_args__ = (Index("ix_equity_run_ts", "run_id", "ts"),)
+
+
+class CandleRecord(Base):
+    __tablename__ = "candles"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    interval: Mapped[str] = mapped_column(String(16), nullable=False)
+    open_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    open: Mapped[Decimal] = mapped_column(NUM, nullable=False)
+    high: Mapped[Decimal] = mapped_column(NUM, nullable=False)
+    low: Mapped[Decimal] = mapped_column(NUM, nullable=False)
+    close: Mapped[Decimal] = mapped_column(NUM, nullable=False)
+    volume: Mapped[Decimal] = mapped_column(NUM, default=Decimal("0"))
+    closed: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    __table_args__ = (
+        Index("ix_candles_run_symbol_interval_time", "run_id", "symbol", "interval", "open_time"),
+        Index("ix_candles_symbol_interval_time", "symbol", "interval", "open_time"),
+    )
+
+
+class TradeLevelSnapshot(Base):
+    __tablename__ = "trade_level_snapshots"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    position_side: Mapped[str | None] = mapped_column(String(8))
+    current_price: Mapped[Decimal | None] = mapped_column(NUM)
+    planned_entry: Mapped[Decimal | None] = mapped_column(NUM)
+    actual_entry: Mapped[Decimal | None] = mapped_column(NUM)
+    take_profit: Mapped[Decimal | None] = mapped_column(NUM)
+    stop_loss: Mapped[Decimal | None] = mapped_column(NUM)
+    liquidation_price: Mapped[Decimal | None] = mapped_column(NUM)
+    source: Mapped[str] = mapped_column(String(32), default="engine")
+
+    __table_args__ = (
+        Index("ix_trade_levels_run_symbol_ts", "run_id", "symbol", "ts"),
+        Index("ix_trade_levels_symbol_ts", "symbol", "ts"),
+    )
+
+
+class SymbolSnapshot(Base):
+    __tablename__ = "symbol_snapshots"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    last_price: Mapped[Decimal | None] = mapped_column(NUM)
+    change_pct: Mapped[Decimal | None] = mapped_column(NUM)
+    position_side: Mapped[str | None] = mapped_column(String(8))
+    unrealized_pnl: Mapped[Decimal | None] = mapped_column(NUM)
+    realized_pnl: Mapped[Decimal | None] = mapped_column(NUM)
+    step_count: Mapped[int | None] = mapped_column(Integer)
+    max_steps: Mapped[int | None] = mapped_column(Integer)
+    last_signal_reason: Mapped[str] = mapped_column(Text, default="")
+
+    __table_args__ = (
+        Index("ix_symbol_snapshots_run_symbol_ts", "run_id", "symbol", "ts"),
+        Index("ix_symbol_snapshots_symbol_ts", "symbol", "ts"),
+    )
 
 
 class ErrorLog(Base):

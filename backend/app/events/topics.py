@@ -16,6 +16,9 @@ class Topics:
         self.equity = f"{prefix}.equity"
         self.errors = f"{prefix}.errors"
         self.market = f"{prefix}.market"
+        self.candles = f"{prefix}.candles"
+        self.trade_levels = f"{prefix}.trade_levels"
+        self.symbol_summaries = f"{prefix}.symbol_summaries"
         self.runs = f"{prefix}.runs"
         # Control commands (start/stop a run) sent from the API to the worker.
         self.control = f"{prefix}.control"
@@ -29,6 +32,9 @@ class Topics:
             self.equity,
             self.errors,
             self.market,
+            self.candles,
+            self.trade_levels,
+            self.symbol_summaries,
             self.runs,
         ]
 
@@ -41,6 +47,10 @@ class Topics:
             self.signals,
             self.equity,
             self.errors,
+            self.market,
+            self.candles,
+            self.trade_levels,
+            self.symbol_summaries,
             self.runs,
         ]
 

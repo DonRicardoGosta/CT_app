@@ -68,6 +68,13 @@ class RealtimeHub:
         if self._consumer:
             await self._consumer.stop()
 
+    def status(self) -> dict:
+        """Runtime status used by the frontend health/diagnostics page."""
+        return {
+            "realtime_hub": "running" if self._consumer is not None and self._task is not None else "degraded",
+            "realtime_clients": len(self._clients),
+        }
+
     async def connect(self, ws: WebSocket) -> Client:
         await ws.accept()
         client = Client(ws=ws, channels=set())

@@ -11,10 +11,11 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.security import decrypt_secret
 from app.db.models import ApiKey, RiskConfig
 from app.db.session import get_session
@@ -25,6 +26,19 @@ from app.risk.config import RiskParams
 from app.services.run_config import RunConfig
 
 router = APIRouter(prefix="/control", tags=["control"])
+
+
+
+async def require_control_token(x_control_token: str | None = Header(default=None)) -> None:
+    """Optional guard for control write actions.
+
+    Dev remains frictionless when CONTROL_API_TOKEN is empty. In production set it
+    and send the same value in the X-Control-Token header before start/stop/live
+    actions are accepted.
+    """
+    expected = get_settings().control_api_token
+    if expected and x_control_token != expected:
+        raise HTTPException(status_code=401, detail="invalid control token")
 
 
 class StartRunIn(BaseModel):
@@ -64,7 +78,10 @@ async def _resolve_risk(body: StartRunIn, session: AsyncSession) -> RiskParams:
 
 @router.post("/start")
 async def start_run(
-    body: StartRunIn, request: Request, session: AsyncSession = Depends(get_session)
+    body: StartRunIn,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _guard: None = Depends(require_control_token),
 ):
     risk = await _resolve_risk(body, session)
     config = RunConfig(
@@ -97,7 +114,7 @@ async def start_run(
 
 
 @router.post("/stop/{run_id}")
-async def stop_run(run_id: str, request: Request):
+async def stop_run(run_id: str, request: Request, _guard: None = Depends(require_control_token)):
     await _publish(request, ControlCommand(action="stop", run_id=run_id))
     return {"run_id": run_id, "stopping": True}
 

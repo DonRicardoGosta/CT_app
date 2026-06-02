@@ -54,3 +54,52 @@ async def get_errors(
     session: AsyncSession = Depends(get_session),
 ):
     return rows_to_list(await repo.list_errors(session, source, severity, limit))
+
+
+@router.get("/signals")
+async def get_signals(
+    run_id: str | None = None,
+    symbol: str | None = None,
+    limit: int = Query(500, le=5000),
+    session: AsyncSession = Depends(get_session),
+):
+    return rows_to_list(await repo.list_signals(session, run_id, symbol, limit))
+
+
+@router.get("/candles")
+async def get_candles(
+    symbol: str,
+    interval: str = "1m",
+    run_id: str | None = None,
+    limit: int = Query(1000, le=10000),
+    session: AsyncSession = Depends(get_session),
+):
+    return rows_to_list(
+        await repo.list_candles(
+            session, run_id=run_id, symbol=symbol, interval=interval, limit=limit
+        )
+    )
+
+
+@router.get("/trade-overlays")
+async def get_trade_overlays(
+    run_id: str | None = None,
+    symbol: str | None = None,
+    limit: int = Query(500, le=5000),
+    session: AsyncSession = Depends(get_session),
+):
+    levels = await repo.list_trade_levels(session, run_id=run_id, symbol=symbol, limit=limit)
+    return rows_to_list(levels)
+
+
+@router.get("/symbol-summary")
+async def get_symbol_summary(
+    run_id: str | None = None,
+    limit: int = Query(500, le=5000),
+    session: AsyncSession = Depends(get_session),
+):
+    # Keep only the latest snapshot per symbol; the repository returns newest first.
+    latest = {}
+    for row in await repo.list_symbol_snapshots(session, run_id=run_id, limit=limit):
+        latest.setdefault(row.symbol, row)
+    return rows_to_list(list(latest.values()))

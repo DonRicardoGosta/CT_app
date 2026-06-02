@@ -6,6 +6,7 @@ import { realtime, type RealtimeEvent, type Status } from "@/lib/ws";
 
 const MAX_FEED = 200;
 const MAX_CURVE = 1000;
+const MAX_CANDLES_PER_KEY = 1500;
 
 export interface PositionRow {
   symbol: string;
@@ -31,6 +32,10 @@ interface RealtimeState {
   signals: RealtimeEvent[];
   errors: RealtimeEvent[];
   runs: RealtimeEvent[];
+  market: Record<string, RealtimeEvent>;
+  candles: Record<string, Record<string, RealtimeEvent[]>>;
+  tradeLevels: Record<string, RealtimeEvent>;
+  symbolSummaries: Record<string, RealtimeEvent>;
   setStatus: (s: Status) => void;
   ingest: (e: RealtimeEvent) => void;
   reset: () => void;
@@ -38,6 +43,36 @@ interface RealtimeState {
 
 function prepend(list: RealtimeEvent[], e: RealtimeEvent): RealtimeEvent[] {
   return [e, ...list].slice(0, MAX_FEED);
+}
+
+function candleKey(e: RealtimeEvent): string {
+  return String(e.interval ?? "1m");
+}
+
+function candleTime(e: RealtimeEvent): string {
+  return String(e.open_time ?? e.ts ?? "");
+}
+
+function appendCandle(
+  candles: Record<string, Record<string, RealtimeEvent[]>>,
+  e: RealtimeEvent,
+): Record<string, Record<string, RealtimeEvent[]>> {
+  const symbol = String(e.symbol ?? "");
+  if (!symbol) return candles;
+  const interval = candleKey(e);
+  const current = candles[symbol]?.[interval] ?? [];
+  const incomingTime = candleTime(e);
+  const withoutSame = current.filter((row) => candleTime(row) !== incomingTime);
+  const next = [...withoutSame, e]
+    .sort((a, b) => new Date(candleTime(a)).getTime() - new Date(candleTime(b)).getTime())
+    .slice(-MAX_CANDLES_PER_KEY);
+  return {
+    ...candles,
+    [symbol]: {
+      ...(candles[symbol] ?? {}),
+      [interval]: next,
+    },
+  };
 }
 
 export const useRealtime = create<RealtimeState>((set) => ({
@@ -50,9 +85,26 @@ export const useRealtime = create<RealtimeState>((set) => ({
   signals: [],
   errors: [],
   runs: [],
+  market: {},
+  candles: {},
+  tradeLevels: {},
+  symbolSummaries: {},
   setStatus: (s) => set({ status: s }),
   reset: () =>
-    set({ positions: {}, equity: null, equityCurve: [], fills: [], orders: [], signals: [], errors: [], runs: [] }),
+    set({
+      positions: {},
+      equity: null,
+      equityCurve: [],
+      fills: [],
+      orders: [],
+      signals: [],
+      errors: [],
+      runs: [],
+      market: {},
+      candles: {},
+      tradeLevels: {},
+      symbolSummaries: {},
+    }),
   ingest: (e) =>
     set((state) => {
       switch (e.type) {
@@ -79,6 +131,20 @@ export const useRealtime = create<RealtimeState>((set) => ({
           return { errors: prepend(state.errors, e) };
         case "run":
           return { runs: prepend(state.runs, e) };
+        case "market": {
+          const symbol = String(e.symbol ?? "");
+          return symbol ? { market: { ...state.market, [symbol]: e } } : {};
+        }
+        case "candle":
+          return { candles: appendCandle(state.candles, e) };
+        case "trade_level": {
+          const symbol = String(e.symbol ?? "");
+          return symbol ? { tradeLevels: { ...state.tradeLevels, [symbol]: e } } : {};
+        }
+        case "symbol_summary": {
+          const symbol = String(e.symbol ?? "");
+          return symbol ? { symbolSummaries: { ...state.symbolSummaries, [symbol]: e } } : {};
+        }
         default:
           return {};
       }
@@ -94,5 +160,17 @@ export function initRealtime() {
   realtime.onStatus((s) => useRealtime.getState().setStatus(s));
   realtime.onEvent((e) => useRealtime.getState().ingest(e));
   realtime.connect();
-  realtime.subscribe(["order", "fill", "position", "signal", "equity", "error", "run"]);
+  realtime.subscribe([
+    "order",
+    "fill",
+    "position",
+    "signal",
+    "equity",
+    "error",
+    "run",
+    "market",
+    "candle",
+    "trade_level",
+    "symbol_summary",
+  ]);
 }

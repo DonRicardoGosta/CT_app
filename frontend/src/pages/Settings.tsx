@@ -11,6 +11,14 @@ export default function Settings() {
   const { data } = useQuery({ queryKey: ["apiKeys"], queryFn: endpoints.apiKeys });
   const [form, setForm] = useState({ name: "", exchange: "bitunix", api_key: "", secret: "" });
   const [testResult, setTestResult] = useState<Record<number, string>>({});
+  const [controlToken, setControlToken] = useState(() => localStorage.getItem("ct-control-token") ?? "");
+  const [tokenMsg, setTokenMsg] = useState("");
+
+  function saveControlToken() {
+    if (controlToken.trim()) localStorage.setItem("ct-control-token", controlToken.trim());
+    else localStorage.removeItem("ct-control-token");
+    setTokenMsg(controlToken.trim() ? "saved" : "cleared");
+  }
 
   const create = useMutation({
     mutationFn: () => endpoints.createApiKey(form),
@@ -65,8 +73,36 @@ export default function Settings() {
         )}
       </Card>
 
-      <Card>
-        <CardTitle>Add API key</CardTitle>
+      <div className="space-y-5">
+        <Card>
+          <CardTitle>Control token</CardTitle>
+          <div className="space-y-3">
+            <Field label="X-Control-Token header">
+              <Input
+                type="password"
+                value={controlToken}
+                onChange={(e) => {
+                  setControlToken(e.target.value);
+                  setTokenMsg("");
+                }}
+                placeholder="Only needed when backend CONTROL_API_TOKEN is set"
+              />
+            </Field>
+            <div className="flex items-center gap-3">
+              <Button variant="primary" onClick={saveControlToken}>
+                Save token locally
+              </Button>
+              {tokenMsg && <span className="text-sm text-muted">{tokenMsg}</span>}
+            </div>
+            <p className="text-xs text-muted">
+              Stored only in this browser. It protects start/stop and later live
+              actions when the backend token guard is enabled.
+            </p>
+          </div>
+        </Card>
+
+        <Card>
+          <CardTitle>Add API key</CardTitle>
         <div className="space-y-3">
           <Field label="Name">
             <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
@@ -92,7 +128,8 @@ export default function Settings() {
             masked form and a connection-test action.
           </p>
         </div>
-      </Card>
+        </Card>
+      </div>
     </div>
   );
 }

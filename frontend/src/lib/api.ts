@@ -3,9 +3,14 @@
 
 const BASE = "/api";
 
+function controlHeaders(): Record<string, string> {
+  const token = globalThis.localStorage?.getItem("ct-control-token");
+  return token ? { "X-Control-Token": token } : {};
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers: { "Content-Type": "application/json", ...controlHeaders(), ...(options.headers || {}) },
     ...options,
   });
   if (!res.ok) {
@@ -74,6 +79,18 @@ export interface RunRow {
 }
 
 export const endpoints = {
+  health: async () => {
+    const res = await fetch("/health");
+    if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+    return (await res.json()) as { status: string };
+  },
+  runtimeDiagnostics: () =>
+    api.get<{
+      api: string;
+      control_bus: string;
+      realtime_hub: string;
+      realtime_clients: number;
+    }>("/diagnostics/runtime"),
   strategies: () => api.get<StrategySchemas>("/config/strategies"),
   apiKeys: () => api.get<ApiKeyPublic[]>("/config/api-keys"),
   createApiKey: (b: { name: string; exchange: string; api_key: string; secret: string }) =>
@@ -88,6 +105,28 @@ export const endpoints = {
   runs: () => api.get<RunRow[]>("/history/runs"),
   orders: (runId?: string) => api.get<any[]>(`/history/orders${runId ? `?run_id=${runId}` : ""}`),
   fills: (runId?: string) => api.get<any[]>(`/history/fills${runId ? `?run_id=${runId}` : ""}`),
+  signals: (runId?: string, symbol?: string) => {
+    const params = new URLSearchParams();
+    if (runId) params.set("run_id", runId);
+    if (symbol) params.set("symbol", symbol);
+    const q = params.toString();
+    return api.get<any[]>(`/history/signals${q ? `?${q}` : ""}`);
+  },
+  candles: (args: { runId?: string; symbol: string; interval: string; limit?: number }) => {
+    const params = new URLSearchParams({ symbol: args.symbol, interval: args.interval });
+    if (args.runId) params.set("run_id", args.runId);
+    if (args.limit) params.set("limit", String(args.limit));
+    return api.get<any[]>(`/history/candles?${params.toString()}`);
+  },
+  tradeOverlays: (runId?: string, symbol?: string) => {
+    const params = new URLSearchParams();
+    if (runId) params.set("run_id", runId);
+    if (symbol) params.set("symbol", symbol);
+    const q = params.toString();
+    return api.get<any[]>(`/history/trade-overlays${q ? `?${q}` : ""}`);
+  },
+  symbolSummary: (runId?: string) =>
+    api.get<any[]>(`/history/symbol-summary${runId ? `?run_id=${runId}` : ""}`),
   equity: (runId: string) => api.get<any[]>(`/history/equity?run_id=${runId}`),
   errors: () => api.get<any[]>("/history/errors"),
   startRun: (b: unknown) => api.post<{ run_id: string; mode: string }>("/control/start", b),

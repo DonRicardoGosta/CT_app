@@ -15,14 +15,18 @@ from typing import TYPE_CHECKING
 from app.core.logging import get_logger
 from app.events.schemas import (
     BaseEvent,
+    CandleEvent,
     EquityEvent,
     ErrorEvent,
     EventType,
     FillEvent,
+    MarketPriceEvent,
     OrderEvent,
     PositionEvent,
     RunEvent,
     SignalEvent,
+    SymbolSummaryEvent,
+    TradeLevelEvent,
 )
 from app.events.topics import Topics, get_topics
 
@@ -44,6 +48,9 @@ def topic_for(event: BaseEvent, topics: Topics) -> str:
         EventType.ERROR: topics.errors,
         EventType.RUN: topics.runs,
         EventType.MARKET: topics.market,
+        EventType.CANDLE: topics.candles,
+        EventType.TRADE_LEVEL: topics.trade_levels,
+        EventType.SYMBOL_SUMMARY: topics.symbol_summaries,
     }[etype]
 
 
@@ -101,6 +108,22 @@ class InMemorySink(EventSink):
     @property
     def runs(self) -> list[RunEvent]:
         return [e for e in self.events if isinstance(e, RunEvent)]
+
+    @property
+    def market(self) -> list[MarketPriceEvent]:
+        return [e for e in self.events if isinstance(e, MarketPriceEvent)]
+
+    @property
+    def candles(self) -> list[CandleEvent]:
+        return [e for e in self.events if isinstance(e, CandleEvent)]
+
+    @property
+    def trade_levels(self) -> list[TradeLevelEvent]:
+        return [e for e in self.events if isinstance(e, TradeLevelEvent)]
+
+    @property
+    def symbol_summaries(self) -> list[SymbolSummaryEvent]:
+        return [e for e in self.events if isinstance(e, SymbolSummaryEvent)]
 
 
 class KafkaSink(EventSink):

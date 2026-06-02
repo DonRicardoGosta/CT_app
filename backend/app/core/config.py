@@ -49,9 +49,22 @@ class Settings(BaseSettings):
     app_env: str = Field(default="development")
     log_level: str = Field(default="INFO")
     log_json: bool = Field(default=False, description="Emit JSON logs (prod) vs console (dev).")
+    cors_allowed_origins: str = Field(
+        default="*",
+        description="Comma-separated allowed origins. Use explicit origins in production.",
+    )
+    control_api_token: str = Field(
+        default="",
+        description="Optional bearer-like token required for /api/control write actions.",
+    )
 
     # Kafka topic names (stable defaults; rarely changed).
     kafka_topic_prefix: str = Field(default="bitunix")
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """Parsed CORS origin list."""
+        return [item.strip() for item in self.cors_allowed_origins.split(",") if item.strip()]
 
     @property
     def sync_database_url(self) -> str:

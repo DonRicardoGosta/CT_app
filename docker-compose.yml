@@ -45,6 +45,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://bitunix:bitunix@postgres:5432/bitunix
       KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-*}
+      CONTROL_API_TOKEN: ${CONTROL_API_TOKEN:-}
       LOG_JSON: "true"
     ports:
       - "8000:8000"
@@ -61,6 +63,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://bitunix:bitunix@postgres:5432/bitunix
       KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-*}
+      CONTROL_API_TOKEN: ${CONTROL_API_TOKEN:-}
       LOG_JSON: "true"
     depends_on:
       backend-api:
@@ -75,6 +79,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://bitunix:bitunix@postgres:5432/bitunix
       KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-*}
+      CONTROL_API_TOKEN: ${CONTROL_API_TOKEN:-}
       LOG_JSON: "true"
     depends_on:
       postgres:

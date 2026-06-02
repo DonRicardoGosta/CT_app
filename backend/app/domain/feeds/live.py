@@ -19,6 +19,7 @@ from app.exchange.bitunix.ws import PUBLIC_URL, BitunixWS
 _INTERVAL_CHANNEL = {
     "1m": "market_kline_1min",
     "5m": "market_kline_5min",
+    "10m": "market_kline_10min",
     "15m": "market_kline_15min",
     "1h": "market_kline_60min",
 }

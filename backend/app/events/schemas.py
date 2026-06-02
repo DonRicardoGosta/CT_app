@@ -22,6 +22,9 @@ class EventType(StrEnum):
     EQUITY = "equity"
     ERROR = "error"
     MARKET = "market"
+    CANDLE = "candle"
+    TRADE_LEVEL = "trade_level"
+    SYMBOL_SUMMARY = "symbol_summary"
     RUN = "run"
 
 
@@ -90,6 +93,64 @@ class SignalEvent(BaseEvent):
     weight: Decimal
     reason: str = ""
     tag: str = ""
+    planned_entry: Decimal | None = None
+    stop_loss: Decimal | None = None
+    take_profit: Decimal | None = None
+
+
+class MarketPriceEvent(BaseEvent):
+    """Last-price update for realtime symbol cards and current price lines."""
+
+    type: Literal[EventType.MARKET] = EventType.MARKET
+    symbol: str
+    price: Decimal
+    source: str = "engine"
+
+
+class CandleEvent(BaseEvent):
+    """Closed OHLCV candle for charting and backtest replay."""
+
+    type: Literal[EventType.CANDLE] = EventType.CANDLE
+    symbol: str
+    interval: str
+    open_time: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
+    closed: bool = True
+
+
+class TradeLevelEvent(BaseEvent):
+    """Chart overlay levels for planned/actual entry, TP and SL."""
+
+    type: Literal[EventType.TRADE_LEVEL] = EventType.TRADE_LEVEL
+    symbol: str
+    position_side: str | None = None
+    current_price: Decimal | None = None
+    planned_entry: Decimal | None = None
+    actual_entry: Decimal | None = None
+    take_profit: Decimal | None = None
+    stop_loss: Decimal | None = None
+    liquidation_price: Decimal | None = None
+    source: str = "engine"
+
+
+class SymbolSummaryEvent(BaseEvent):
+    """Compact per-symbol state for the five always-visible symbol cards."""
+
+    type: Literal[EventType.SYMBOL_SUMMARY] = EventType.SYMBOL_SUMMARY
+    symbol: str
+    status: str
+    last_price: Decimal | None = None
+    change_pct: Decimal | None = None
+    position_side: str | None = None
+    unrealized_pnl: Decimal | None = None
+    realized_pnl: Decimal | None = None
+    step_count: int | None = None
+    max_steps: int | None = None
+    last_signal_reason: str = ""
 
 
 class EquityEvent(BaseEvent):
@@ -125,5 +186,9 @@ EVENT_MODELS: dict[EventType, type[BaseEvent]] = {
     EventType.SIGNAL: SignalEvent,
     EventType.EQUITY: EquityEvent,
     EventType.ERROR: ErrorEvent,
+    EventType.MARKET: MarketPriceEvent,
+    EventType.CANDLE: CandleEvent,
+    EventType.TRADE_LEVEL: TradeLevelEvent,
+    EventType.SYMBOL_SUMMARY: SymbolSummaryEvent,
     EventType.RUN: RunEvent,
 }

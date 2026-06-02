@@ -60,10 +60,12 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    settings = get_settings()
+    cors_origins = settings.cors_origins or ["*"]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
+        allow_origins=cors_origins,
+        allow_credentials="*" not in cors_origins,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -71,6 +73,18 @@ def create_app() -> FastAPI:
     @app.get("/health", tags=["meta"])
     async def health():
         return {"status": "ok"}
+
+    @app.get("/api/diagnostics/runtime", tags=["meta"])
+    async def runtime_diagnostics():
+        hub_status = app.state.hub.status() if getattr(app.state, "hub", None) else {
+            "realtime_hub": "missing",
+            "realtime_clients": 0,
+        }
+        return {
+            "api": "ok",
+            "control_bus": "ready" if getattr(app.state, "control_producer", None) is not None else "unavailable",
+            **hub_status,
+        }
 
     app.include_router(history_router, prefix="/api")
     app.include_router(config_router, prefix="/api")

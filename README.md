@@ -96,3 +96,33 @@ npm run dev
 
 Live order placement is implemented but **dry-run is the default**. Switching a run
 to `live` is an explicit action from the frontend.
+
+## Trading Workspace dry-run validation
+
+After starting the stack, run the validator from the project root to verify the new
+Trading Workspace event path end-to-end:
+
+```bash
+docker compose up --build
+python scripts/validate_trading_workspace.py --base-url http://localhost:8000
+```
+
+If `CONTROL_API_TOKEN` is set, pass it to the validator and also save it in the
+frontend Settings page so the browser sends `X-Control-Token` for control actions:
+
+```bash
+python scripts/validate_trading_workspace.py \
+  --base-url http://localhost:8000 \
+  --control-token "$CONTROL_API_TOKEN"
+```
+
+The validator checks:
+
+- `/health` and strategy config REST availability,
+- `/api/control/start` dry-run launch,
+- `/api/realtime/ws` channel subscription,
+- delivery of `market`, `candle`, `trade_level`, `symbol_summary`, `run`, and `equity` events,
+- history endpoint smoke checks for runs, orders, fills, signals, candles, overlays, and symbol summaries.
+
+This script is intentionally dry-run only. Live trade actions still need a separate
+auth/confirm/audit implementation before enabling close/reduce/cancel buttons.

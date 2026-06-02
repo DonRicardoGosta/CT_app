@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
+    CandleRecord,
     EquitySnapshot,
     ErrorLog,
     FillRecord,
@@ -22,9 +23,12 @@ from app.db.models import (
     PositionSnapshot,
     Run,
     SignalRecord,
+    SymbolSnapshot,
+    TradeLevelSnapshot,
 )
 from app.events.schemas import (
     BaseEvent,
+    CandleEvent,
     EquityEvent,
     ErrorEvent,
     EventType,
@@ -33,6 +37,8 @@ from app.events.schemas import (
     PositionEvent,
     RunEvent,
     SignalEvent,
+    SymbolSummaryEvent,
+    TradeLevelEvent,
 )
 
 
@@ -105,6 +111,61 @@ def _signal_row(e: SignalEvent) -> dict[str, Any]:
         "weight": e.weight,
         "reason": e.reason,
         "tag": e.tag,
+        "planned_entry": e.planned_entry,
+        "stop_loss": e.stop_loss,
+        "take_profit": e.take_profit,
+    }
+
+
+def _candle_row(e: CandleEvent) -> dict[str, Any]:
+    return {
+        "run_id": e.run_id,
+        "mode": e.mode,
+        "ts": e.ts,
+        "symbol": e.symbol,
+        "interval": e.interval,
+        "open_time": e.open_time,
+        "open": e.open,
+        "high": e.high,
+        "low": e.low,
+        "close": e.close,
+        "volume": e.volume,
+        "closed": e.closed,
+    }
+
+
+def _trade_level_row(e: TradeLevelEvent) -> dict[str, Any]:
+    return {
+        "run_id": e.run_id,
+        "mode": e.mode,
+        "ts": e.ts,
+        "symbol": e.symbol,
+        "position_side": e.position_side,
+        "current_price": e.current_price,
+        "planned_entry": e.planned_entry,
+        "actual_entry": e.actual_entry,
+        "take_profit": e.take_profit,
+        "stop_loss": e.stop_loss,
+        "liquidation_price": e.liquidation_price,
+        "source": e.source,
+    }
+
+
+def _symbol_summary_row(e: SymbolSummaryEvent) -> dict[str, Any]:
+    return {
+        "run_id": e.run_id,
+        "mode": e.mode,
+        "ts": e.ts,
+        "symbol": e.symbol,
+        "status": e.status,
+        "last_price": e.last_price,
+        "change_pct": e.change_pct,
+        "position_side": e.position_side,
+        "unrealized_pnl": e.unrealized_pnl,
+        "realized_pnl": e.realized_pnl,
+        "step_count": e.step_count,
+        "max_steps": e.max_steps,
+        "last_signal_reason": e.last_signal_reason,
     }
 
 
@@ -139,6 +200,9 @@ _MODEL_BUILDERS: dict[EventType, tuple[type, Callable[[Any], dict[str, Any]]]] =
     EventType.FILL: (FillRecord, _fill_row),
     EventType.POSITION: (PositionSnapshot, _position_row),
     EventType.SIGNAL: (SignalRecord, _signal_row),
+    EventType.CANDLE: (CandleRecord, _candle_row),
+    EventType.TRADE_LEVEL: (TradeLevelSnapshot, _trade_level_row),
+    EventType.SYMBOL_SUMMARY: (SymbolSnapshot, _symbol_summary_row),
     EventType.EQUITY: (EquitySnapshot, _equity_row),
     EventType.ERROR: (ErrorLog, _error_row),
 }
@@ -250,5 +314,66 @@ async def list_errors(
         stmt = stmt.where(ErrorLog.source == source)
     if severity:
         stmt = stmt.where(ErrorLog.severity == severity)
+    res = await session.execute(stmt)
+    return list(res.scalars().all())
+
+
+async def list_signals(
+    session: AsyncSession,
+    run_id: str | None = None,
+    symbol: str | None = None,
+    limit: int = 500,
+) -> list[SignalRecord]:
+    stmt = select(SignalRecord).order_by(SignalRecord.ts.desc()).limit(limit)
+    if run_id:
+        stmt = stmt.where(SignalRecord.run_id == run_id)
+    if symbol:
+        stmt = stmt.where(SignalRecord.symbol == symbol)
+    res = await session.execute(stmt)
+    return list(res.scalars().all())
+
+
+async def list_candles(
+    session: AsyncSession,
+    *,
+    run_id: str | None,
+    symbol: str,
+    interval: str,
+    limit: int = 1000,
+) -> list[CandleRecord]:
+    stmt = (
+        select(CandleRecord)
+        .where(CandleRecord.symbol == symbol, CandleRecord.interval == interval)
+        .order_by(CandleRecord.open_time.desc())
+        .limit(limit)
+    )
+    if run_id:
+        stmt = stmt.where(CandleRecord.run_id == run_id)
+    res = await session.execute(stmt)
+    return list(reversed(res.scalars().all()))
+
+
+async def list_trade_levels(
+    session: AsyncSession,
+    *,
+    run_id: str | None = None,
+    symbol: str | None = None,
+    limit: int = 500,
+) -> list[TradeLevelSnapshot]:
+    stmt = select(TradeLevelSnapshot).order_by(TradeLevelSnapshot.ts.desc()).limit(limit)
+    if run_id:
+        stmt = stmt.where(TradeLevelSnapshot.run_id == run_id)
+    if symbol:
+        stmt = stmt.where(TradeLevelSnapshot.symbol == symbol)
+    res = await session.execute(stmt)
+    return list(res.scalars().all())
+
+
+async def list_symbol_snapshots(
+    session: AsyncSession, run_id: str | None = None, limit: int = 500
+) -> list[SymbolSnapshot]:
+    stmt = select(SymbolSnapshot).order_by(SymbolSnapshot.ts.desc()).limit(limit)
+    if run_id:
+        stmt = stmt.where(SymbolSnapshot.run_id == run_id)
     res = await session.execute(stmt)
     return list(res.scalars().all())
