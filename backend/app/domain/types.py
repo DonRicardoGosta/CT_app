@@ -142,6 +142,22 @@ class MarketEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class TakeProfitLeg:
+    """One exchange take-profit: trigger price and size in base coin."""
+
+    price: Decimal
+    qty: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class ProtectionPlan:
+    """TP/SL orders to place on the exchange after an entry fill (live mode)."""
+
+    stop_price: Decimal
+    take_profits: tuple[TakeProfitLeg, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class TradeIntent:
     """What a strategy *wants* to do. Sizing/leverage is decided by risk (REQ-007).
 

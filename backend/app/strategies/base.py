@@ -18,6 +18,7 @@ from app.domain.types import (
     AccountState,
     Instrument,
     MarketEvent,
+    ProtectionPlan,
     TradeIntent,
 )
 
@@ -32,6 +33,9 @@ class StrategyContext:
     instruments: dict[str, Instrument]
     market: MarketState
     interval: str = "1m"
+    #: When True (live runs), TP/SL are exchange orders — strategies must not
+    #: emit close/reduce intents from price checks against those levels.
+    exchange_protections: bool = False
 
 
 class Strategy(abc.ABC):
@@ -83,6 +87,17 @@ class Strategy(abc.ABC):
         Return ``{"take_profits": [Decimal, ...], "stops": [Decimal, ...]}`` as
         price levels, or ``None`` to let the engine fall back to a single TP/SL.
         """
+        return None
+
+    def protection_plan(
+        self,
+        symbol: str,
+        side: object,
+        entry_price: object,
+        position_qty: object,
+        instrument: Instrument,
+    ) -> ProtectionPlan | None:
+        """Optional TP/SL ladder for exchange placement after entry (live only)."""
         return None
 
     def drain_scan_logs(self) -> list[dict]:

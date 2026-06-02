@@ -19,6 +19,8 @@ from app.domain.types import (
     MarketEvent,
     Order,
     OrderRequest,
+    PositionSide,
+    ProtectionPlan,
 )
 
 
@@ -65,3 +67,14 @@ class Broker(abc.ABC):
     @abc.abstractmethod
     async def set_mark(self, symbol: str, price: object) -> None:
         """Inform the broker of the latest price for mark-to-market (sim only)."""
+
+    async def place_exchange_protections(
+        self,
+        *,
+        symbol: str,
+        position_side: PositionSide,
+        plan: ProtectionPlan,
+        instrument: Instrument,
+    ) -> None:
+        """After an entry fill, register TP/SL on the exchange (live broker only)."""
+        return None

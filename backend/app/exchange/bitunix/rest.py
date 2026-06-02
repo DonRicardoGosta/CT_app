@@ -16,7 +16,13 @@ from typing import Any
 import httpx
 
 from app.core.logging import get_logger
-from app.domain.types import Bar, Instrument, OrderRequest, PositionSide, Side
+from app.domain.types import (
+    Bar,
+    Instrument,
+    OrderRequest,
+    PositionSide,
+    Side,
+)
 from app.exchange.bitunix.models import parse_instrument, parse_kline
 from app.exchange.bitunix.signing import rest_headers
 
@@ -272,6 +278,53 @@ class BitunixRest:
         body = {"symbol": symbol, "leverage": leverage, "marginCoin": "USDT"}
         return await self._request(
             "POST", "/api/v1/futures/account/change_leverage", body=body, signed=True
+        )
+
+    async def place_tpsl_order(
+        self,
+        *,
+        symbol: str,
+        position_id: str,
+        sl_price: str | None = None,
+        sl_qty: str | None = None,
+        tp_price: str | None = None,
+        tp_qty: str | None = None,
+    ) -> Any:
+        """Place a TP and/or SL trigger order for an open position."""
+        body: dict[str, Any] = {"symbol": symbol, "positionId": position_id}
+        if sl_price is not None:
+            body["slPrice"] = sl_price
+            body["slStopType"] = "LAST_PRICE"
+            body["slOrderType"] = "MARKET"
+        if sl_qty is not None:
+            body["slQty"] = sl_qty
+        if tp_price is not None:
+            body["tpPrice"] = tp_price
+            body["tpStopType"] = "LAST_PRICE"
+            body["tpOrderType"] = "MARKET"
+        if tp_qty is not None:
+            body["tpQty"] = tp_qty
+        return await self._request(
+            "POST", "/api/v1/futures/tpsl/place_order", body=body, signed=True
+        )
+
+    async def modify_position_tpsl(
+        self,
+        *,
+        symbol: str,
+        position_id: str,
+        sl_price: str | None = None,
+        tp_price: str | None = None,
+    ) -> Any:
+        body: dict[str, Any] = {"symbol": symbol, "positionId": position_id}
+        if sl_price is not None:
+            body["slPrice"] = sl_price
+            body["slStopType"] = "LAST_PRICE"
+        if tp_price is not None:
+            body["tpPrice"] = tp_price
+            body["tpStopType"] = "LAST_PRICE"
+        return await self._request(
+            "POST", "/api/v1/futures/tpsl/position/modify_order", body=body, signed=True
         )
 
     async def test_credentials(self) -> bool:

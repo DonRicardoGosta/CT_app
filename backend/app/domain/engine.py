@@ -111,6 +111,24 @@ class Engine:
         self._interval = interval
         self._scanned_once = False
 
+    def _strategy_context(
+        self,
+        *,
+        event: MarketEvent,
+        account: AccountState,
+        instruments: dict[str, Instrument],
+        interval: str,
+    ) -> StrategyContext:
+        return StrategyContext(
+            event=event,
+            now=self.clock.now(),
+            account=account,
+            instruments=instruments,
+            market=self.market,
+            interval=interval,
+            exchange_protections=self.mode is Mode.LIVE,
+        )
+
     def request_stop(self) -> None:
         """Ask the loop to finish after the current event (live use)."""
         self._stop = True
@@ -172,13 +190,8 @@ class Engine:
     # ------------------------------------------------------------------ #
     async def _on_start(self, event: MarketEvent, instruments: dict[str, Instrument]) -> None:
         account = await self.broker.account()
-        ctx = StrategyContext(
-            event=event,
-            now=self.clock.now(),
-            account=account,
-            instruments=instruments,
-            market=self.market,
-            interval=self._interval,
+        ctx = self._strategy_context(
+            event=event, account=account, instruments=instruments, interval=self._interval
         )
         await self.strategy.on_start(ctx)
         if event.bar is not None:
@@ -237,13 +250,8 @@ class Engine:
 
         # 2) strategy decision (pure)
         account = await self.broker.account()
-        ctx = StrategyContext(
-            event=event,
-            now=self.clock.now(),
-            account=account,
-            instruments=instruments,
-            market=self.market,
-            interval=self._interval,
+        ctx = self._strategy_context(
+            event=event, account=account, instruments=instruments, interval=self._interval
         )
         self.strategy.scan_diagnostics(ctx)
         await self._flush_strategy_logs()
@@ -366,6 +374,31 @@ class Engine:
                     source="order",
                 )
                 await self._emit_symbol_summary(order.symbol, status="in_position")
+                if self.mode is Mode.LIVE and instrument is not None:
+                    plan = self.strategy.protection_plan(
+                        order.symbol,
+                        order.position_side,
+                        entry,
+                        order.filled_qty or order.qty,
+                        instrument,
+                    )
+                    if plan is not None:
+                        await self.broker.place_exchange_protections(
+                            symbol=order.symbol,
+                            position_side=order.position_side,
+                            plan=plan,
+                            instrument=instrument,
+                        )
+                        await self._emit_log(
+                            "broker",
+                            "info",
+                            f"exchange TP/SL placed for {order.symbol}",
+                            context={
+                                "symbol": order.symbol,
+                                "stop": str(plan.stop_price),
+                                "tp_legs": len(plan.take_profits),
+                            },
+                        )
 
     async def _scan_and_select(
         self, instruments: dict[str, Instrument], summary: EngineSummary
@@ -385,12 +418,10 @@ class Engine:
         placeholder = MarketEvent(
             type=MarketEventType.TICK, ts=self.clock.now(), symbol=""
         )
-        ctx0 = StrategyContext(
+        ctx0 = self._strategy_context(
             event=placeholder,
-            now=self.clock.now(),
             account=account,
             instruments=instruments,
-            market=self.market,
             interval=self._interval,
         )
         await self.strategy.on_start(ctx0)
@@ -447,12 +478,10 @@ class Engine:
                     bar=last,
                 )
                 acct = await self.broker.account()
-                ctx = StrategyContext(
+                ctx = self._strategy_context(
                     event=event,
-                    now=self.clock.now(),
                     account=acct,
                     instruments=instruments,
-                    market=self.market,
                     interval=self._interval,
                 )
                 intents = self.strategy.on_event(ctx)

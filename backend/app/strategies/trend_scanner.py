@@ -35,9 +35,12 @@ from app.domain.types import (
     Instrument,
     IntentAction,
     PositionSide,
+    ProtectionPlan,
     Side,
+    TakeProfitLeg,
     TradeIntent,
 )
+from app.risk.sizer import _round_qty
 from app.strategies.base import Strategy, StrategyContext
 from app.strategies.indicators import ema, rsi
 from app.strategies.registry import register_strategy
@@ -141,6 +144,10 @@ class TrendScannerStrategy(Strategy):
         self._best: dict[tuple[str, str], Decimal] = {}
         self._pending_logs: list[dict] = []
         self._last_scan_reason: dict[str, str] = {}
+        self._exchange_protections = False
+
+    async def on_start(self, context: StrategyContext) -> None:
+        self._exchange_protections = context.exchange_protections
 
     # ------------------------------------------------------------------ #
     # Universe & selection
@@ -344,6 +351,46 @@ class TrendScannerStrategy(Strategy):
         stop = self._stop.get(_key(symbol, side)) or self._initial_stop(entry, side)
         return {"take_profits": tps, "stops": [stop]}
 
+    def protection_plan(
+        self,
+        symbol: str,
+        side: object,
+        entry_price: object,
+        position_qty: object,
+        instrument: Instrument,
+    ) -> ProtectionPlan | None:
+        """Build exchange TP/SL legs from entry size (live mode)."""
+        if not isinstance(side, PositionSide):
+            return None
+        entry = Decimal(str(entry_price))
+        qty = Decimal(str(position_qty))
+        if qty <= 0:
+            return None
+        stop = self._stop.get(_key(symbol, side)) or self._initial_stop(entry, side)
+        remaining = qty
+        legs: list[TakeProfitLeg] = []
+        levels = self._tp_levels()
+        prec = instrument.base_precision
+        for idx, (move_pct, close_frac) in enumerate(levels):
+            move = move_pct / Decimal(100)
+            if side is PositionSide.LONG:
+                price = entry * (Decimal(1) + move)
+            else:
+                price = entry * (Decimal(1) - move)
+            is_last = idx == len(levels) - 1
+            if is_last or close_frac >= Decimal(1):
+                leg_qty = remaining
+            else:
+                leg_qty = _round_qty(remaining * close_frac, prec)
+            if leg_qty <= 0:
+                continue
+            leg_qty = min(leg_qty, remaining)
+            legs.append(TakeProfitLeg(price=price, qty=leg_qty))
+            remaining -= leg_qty
+            if remaining <= 0:
+                break
+        return ProtectionPlan(stop_price=stop, take_profits=tuple(legs))
+
     # ------------------------------------------------------------------ #
     # Decision
     # ------------------------------------------------------------------ #
@@ -379,9 +426,15 @@ class TrendScannerStrategy(Strategy):
 
         # Manage existing positions first (TPs and stops), both sides.
         for side in (PositionSide.LONG, PositionSide.SHORT):
+            k = _key(symbol, side)
             pos = context.account.position(symbol, side)
-            if pos is not None and pos.qty > 0:
-                intents.extend(self._manage_position(symbol, side, pos, price))
+            if pos is None or pos.qty <= 0:
+                if self._exchange_protections and (
+                    k in self._stop or k in self._tps_hit or k in self._best
+                ):
+                    self._reset_trade(k)
+                continue
+            intents.extend(self._manage_position(symbol, side, pos, price))
 
         if intents:
             return intents
@@ -470,6 +523,13 @@ class TrendScannerStrategy(Strategy):
     ) -> list[TradeIntent]:
         k = _key(symbol, side)
         intents: list[TradeIntent] = []
+
+        # Live: TP/SL are resting exchange orders; do not emulate exits on bars.
+        if self._exchange_protections:
+            best = self._best.get(k, pos.entry_price)
+            best = max(best, price) if side is PositionSide.LONG else min(best, price)
+            self._best[k] = best
+            return intents
 
         # Track the best (most favorable) price for trailing.
         best = self._best.get(k, pos.entry_price)

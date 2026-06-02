@@ -12,6 +12,7 @@ guarded and dry-run is the default (REQ-003).
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -21,13 +22,16 @@ from app.domain.interfaces import Broker
 from app.domain.types import (
     AccountState,
     Fill,
+    Instrument,
     Order,
     OrderRequest,
     OrderStatus,
     Position,
     PositionSide,
+    ProtectionPlan,
 )
 from app.exchange.bitunix.rest import BitunixRest
+from app.risk.sizer import _round_qty
 
 log = get_logger(__name__)
 
@@ -46,9 +50,93 @@ class LiveBroker(Broker):
         self._rest = rest
         self._marks: dict[str, Decimal] = {}
         self._order_seq = 0
+        self._tpsl_ids: dict[tuple[str, PositionSide], list[str]] = {}
 
     async def set_mark(self, symbol: str, price: object) -> None:
         self._marks[symbol] = Decimal(str(price))
+
+    async def place_exchange_protections(
+        self,
+        *,
+        symbol: str,
+        position_side: PositionSide,
+        plan: ProtectionPlan,
+        instrument: Instrument,
+    ) -> None:
+        """Register stop-loss and scaled take-profits on Bitunix after entry."""
+        position_id, pos_qty = await self._resolve_position(symbol, position_side)
+        if not position_id:
+            log.error("tpsl_no_position", symbol=symbol, side=position_side.value)
+            return
+        sl_qty = _round_qty(pos_qty, instrument.base_precision)
+        if sl_qty <= 0:
+            sl_qty = pos_qty
+        placed: list[str] = []
+        try:
+            sl_resp = await self._rest.place_tpsl_order(
+                symbol=symbol,
+                position_id=position_id,
+                sl_price=str(plan.stop_price),
+                sl_qty=str(sl_qty),
+            )
+            if isinstance(sl_resp, dict) and sl_resp.get("orderId"):
+                placed.append(str(sl_resp["orderId"]))
+            for leg in plan.take_profits:
+                if leg.qty <= 0:
+                    continue
+                tp_resp = await self._rest.place_tpsl_order(
+                    symbol=symbol,
+                    position_id=position_id,
+                    tp_price=str(leg.price),
+                    tp_qty=str(_round_qty(leg.qty, instrument.base_precision)),
+                )
+                if isinstance(tp_resp, dict) and tp_resp.get("orderId"):
+                    placed.append(str(tp_resp["orderId"]))
+            self._tpsl_ids[(symbol, position_side)] = placed
+            log.info(
+                "exchange_tpsl_placed",
+                symbol=symbol,
+                side=position_side.value,
+                position_id=position_id,
+                sl=str(plan.stop_price),
+                tp_count=len(plan.take_profits),
+                order_ids=placed,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "exchange_tpsl_failed",
+                error=str(exc),
+                symbol=symbol,
+                side=position_side.value,
+            )
+
+    async def _resolve_position(
+        self, symbol: str, position_side: PositionSide
+    ) -> tuple[str | None, Decimal]:
+        """Return ``(positionId, qty)`` for the hedge leg, polling briefly after fill."""
+        want_long = position_side is PositionSide.LONG
+        for _ in range(5):
+            raw = await self._rest.get_positions(symbol)
+            items = raw if isinstance(raw, list) else (raw or {}).get("list") or []
+            if not isinstance(items, list):
+                items = [items] if items else []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("symbol")) != symbol:
+                    continue
+                qty = _dec(item.get("qty") or item.get("size") or item.get("positionAmt"))
+                if qty == 0:
+                    continue
+                side_raw = str(item.get("side") or item.get("positionSide") or "").upper()
+                is_long = "LONG" in side_raw or ("BUY" in side_raw and "SHORT" not in side_raw)
+                if is_long != want_long:
+                    continue
+                pid = item.get("positionId") or item.get("position_id") or item.get("id")
+                if pid is not None:
+                    return str(pid), abs(qty)
+            await asyncio.sleep(0.2)
+        return None, Decimal("0")
 
     async def submit(self, request: OrderRequest) -> Order:
         self._order_seq += 1
