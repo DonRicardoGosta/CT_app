@@ -48,7 +48,13 @@ class TrendScannerParams(BaseModel):
 
     # -- universe & selection ------------------------------------------------ #
     scan_universe: int = Field(
-        default=30, ge=1, le=200, description="How many USDT pairs to scan for setups."
+        default=30, ge=1, le=200, description="Active scan batch size (top N by volume)."
+    )
+    max_scan_rank: int = Field(
+        default=500,
+        ge=1,
+        le=1000,
+        description="Maximum volume rank to scan by expanding in scan_universe batches.",
     )
     max_symbols: int = Field(
         default=5, ge=1, le=50, description="How many coins to actively trade at once."
@@ -121,6 +127,7 @@ class TrendScannerStrategy(Strategy):
         super().__init__(params)
         self.p: TrendScannerParams = self.params  # type: ignore[assignment]
         self._universe: list[str] = []
+        self._active_limit = self.p.scan_universe
         self._selected: list[str] = []
         # Per (symbol, side) trade state.
         self._last_entry: dict[tuple[str, str], Decimal] = {}
@@ -133,22 +140,56 @@ class TrendScannerStrategy(Strategy):
     # Universe & selection
     # ------------------------------------------------------------------ #
     def desired_symbols(self, instruments: dict[str, Instrument]) -> list[str]:
-        candidates = sorted(
+        # Preserve instrument order. The builder pre-sorts this dict by 24h
+        # quote volume, so this becomes a top-volume ranked universe.
+        candidates = [
             sym for sym, inst in instruments.items() if inst.quote.upper() == "USDT"
-        )
-        self._universe = candidates[: self.p.scan_universe]
+        ]
+        self._universe = candidates[: self.p.max_scan_rank]
+        self._active_limit = min(self.p.scan_universe, len(self._universe))
         return self._universe
 
     def selection_snapshot(self, context: StrategyContext) -> dict | None:
+        self._maybe_expand_active_batch(context)
         # Only count coins we actually receive data for as "scanning".
         seen = set(context.market.symbols())
-        universe = [s for s in (self._universe or list(context.instruments)) if s in seen]
+        active = (self._universe or list(context.instruments))[: self._active_limit]
+        universe = [s for s in active if s in seen]
         scanning = [s for s in universe if s not in self._selected]
         return {
             "selected": list(self._selected),
             "scanning": scanning,
             "target": self.p.max_symbols,
+            "active_limit": self._active_limit,
         }
+
+    def _required_history(self) -> int:
+        return max(self.p.ema_slow, self.p.trend_ema, self.p.rsi_period) + 1
+
+    def _maybe_expand_active_batch(self, context: StrategyContext) -> None:
+        """Move from top 30 -> top 60 -> ... -> top 500, one batch at a time.
+
+        Expansion is synchronous and owned by the strategy instance, so one run
+        cannot start overlapping "next top coins" searches. A new batch is opened
+        only after every currently active symbol has enough bars to be evaluated
+        and we still have fewer than ``max_symbols`` selected.
+        """
+        if len(self._selected) >= self.p.max_symbols:
+            return
+        if self._active_limit >= len(self._universe):
+            return
+        active = self._universe[: self._active_limit]
+        required = self._required_history()
+        if not active:
+            return
+        ready = all(len(context.market.closes(sym)) >= required for sym in active)
+        if not ready:
+            return
+        self._active_limit = min(
+            self._active_limit + self.p.scan_universe,
+            len(self._universe),
+            self.p.max_scan_rank,
+        )
 
     def _slot_free(self) -> bool:
         return len(self._selected) < self.p.max_symbols
@@ -198,8 +239,10 @@ class TrendScannerStrategy(Strategy):
         if bar is None:
             return []
         symbol = bar.symbol
+        if self._universe and symbol not in self._universe[: self._active_limit]:
+            return []
         closes = context.market.closes(symbol)
-        need = max(self.p.ema_slow, self.p.trend_ema, self.p.rsi_period) + 1
+        need = self._required_history()
         if len(closes) < need:
             return []
 

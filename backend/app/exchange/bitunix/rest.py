@@ -114,6 +114,33 @@ class BitunixRest:
             out[inst.symbol] = inst
         return out
 
+    async def get_tickers(self, symbols: list[str] | None = None) -> list[dict[str, Any]]:
+        """Return 24h ticker data; includes ``quoteVol`` used for ranking."""
+        params = {"symbols": ",".join(symbols)} if symbols else None
+        data = await self._request(
+            "GET", "/api/v1/futures/market/tickers", params=params
+        )
+        return list(data or [])
+
+    async def get_volume_ranked_symbols(
+        self, symbols: list[str] | None = None, limit: int = 500
+    ) -> list[str]:
+        """Return symbols sorted by descending 24h quote volume."""
+        tickers = await self.get_tickers(symbols)
+
+        def quote_vol(item: dict[str, Any]) -> Decimal:
+            try:
+                return Decimal(str(item.get("quoteVol", "0")))
+            except Exception:  # noqa: BLE001 - bad exchange payload -> bottom
+                return Decimal("0")
+
+        ranked = sorted(
+            (t for t in tickers if t.get("symbol")),
+            key=quote_vol,
+            reverse=True,
+        )
+        return [str(t["symbol"]) for t in ranked[:limit]]
+
     async def get_klines(
         self,
         symbol: str,

@@ -30,6 +30,7 @@ log = get_logger(__name__)
 # live/dry mode). Backtests fetch klines per symbol, so cap the auto set to keep
 # runs fast when no explicit symbols are given.
 BACKTEST_MAX_AUTO_SYMBOLS = 8
+MAX_VOLUME_RANK = 500
 
 
 async def _emit_builder_log(
@@ -62,6 +63,17 @@ def _resolve_symbols(
     return desired or list(instruments)[:5]
 
 
+def _reorder_instruments(
+    instruments: dict[str, Instrument], ranked_symbols: list[str]
+) -> dict[str, Instrument]:
+    """Return instruments ordered by ``ranked_symbols`` first, preserving leftovers."""
+    ranked = {sym: instruments[sym] for sym in ranked_symbols if sym in instruments}
+    for sym, inst in instruments.items():
+        if sym not in ranked:
+            ranked[sym] = inst
+    return ranked
+
+
 async def build_engine(
     config: RunConfig,
     sink: EventSink,
@@ -86,6 +98,29 @@ async def build_engine(
             f"trading pairs fetch failed: {exc}",
         )
         instruments = {}
+
+    volume_ranked: list[str] = []
+    if instruments and not config.symbols:
+        try:
+            volume_ranked = await rest.get_volume_ranked_symbols(
+                list(instruments), limit=MAX_VOLUME_RANK
+            )
+            instruments = _reorder_instruments(instruments, volume_ranked)
+            await _emit_builder_log(
+                sink,
+                config,
+                "info",
+                "ranked symbols by 24h quote volume",
+                context={"top_symbols": volume_ranked[:30], "limit": MAX_VOLUME_RANK},
+            )
+        except Exception as exc:  # noqa: BLE001 - fall back to exchange order
+            log.warning("ticker_volume_ranking_failed", error=str(exc))
+            await _emit_builder_log(
+                sink,
+                config,
+                "warn",
+                f"volume ranking failed, falling back to exchange order: {exc}",
+            )
 
     symbols = _resolve_symbols(config, strategy, instruments)
     # Backtests load klines per symbol; cap the auto-selected universe.

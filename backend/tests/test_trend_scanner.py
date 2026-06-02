@@ -83,6 +83,23 @@ def _instruments(symbol: str = "BTCUSDT") -> dict[str, Instrument]:
     }
 
 
+def _multi_instruments(n: int) -> dict[str, Instrument]:
+    return {
+        f"COIN{i:02d}USDT": Instrument(
+            symbol=f"COIN{i:02d}USDT",
+            base=f"COIN{i:02d}",
+            quote="USDT",
+            min_trade_volume=Decimal("0.0001"),
+            base_precision=4,
+            quote_precision=2,
+            min_leverage=1,
+            max_leverage=50,
+            default_leverage=10,
+        )
+        for i in range(n)
+    }
+
+
 async def _run(bars, instruments, sink, params=None):
     strategy = create_strategy(
         "trend_scanner",
@@ -169,3 +186,57 @@ def test_position_levels_uses_leverage():
     # 10% ROE at 10x -> 1% price move -> 101.0 for the first TP.
     assert lv["take_profits"][0] == Decimal("101.0")
     assert lv["stops"], "an initial stop level must be present"
+
+
+def test_desired_symbols_preserves_volume_rank_order_and_caps_to_max_rank():
+    instruments = _multi_instruments(12)
+    # Simulate builder volume ordering by inserting symbols in reverse rank order.
+    ranked = {sym: instruments[sym] for sym in reversed(list(instruments))}
+    strat = create_strategy(
+        "trend_scanner",
+        {"scan_universe": 3, "max_scan_rank": 7, "max_symbols": 5},
+    )
+    desired = strat.desired_symbols(ranked)
+    assert desired == list(ranked)[:7]
+
+
+def test_selection_expands_one_volume_batch_at_a_time():
+    instruments = _multi_instruments(7)
+    strat = create_strategy(
+        "trend_scanner",
+        {
+            "scan_universe": 3,
+            "max_scan_rank": 7,
+            "max_symbols": 5,
+            "ema_fast": 2,
+            "ema_slow": 3,
+            "trend_ema": 5,
+            "rsi_period": 2,
+        },
+    )
+    desired = strat.desired_symbols(instruments)
+    assert desired == list(instruments)[:7]
+
+    class Market:
+        def __init__(self, ready: int) -> None:
+            self.ready = ready
+
+        def symbols(self):
+            return list(instruments)[: self.ready]
+
+        def closes(self, symbol: str):
+            idx = list(instruments).index(symbol)
+            return [Decimal("1")] * 6 if idx < self.ready else []
+
+    class Ctx:
+        def __init__(self, ready: int) -> None:
+            self.instruments = instruments
+            self.market = Market(ready)
+
+    # First 3 ready -> opens next batch, but only one expansion happens.
+    snap = strat.selection_snapshot(Ctx(ready=3))
+    assert snap["active_limit"] == 6
+    assert len(snap["scanning"]) == 3
+    # Now first 6 ready -> opens final batch.
+    snap = strat.selection_snapshot(Ctx(ready=6))
+    assert snap["active_limit"] == 7
