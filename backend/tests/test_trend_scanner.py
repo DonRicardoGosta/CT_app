@@ -229,6 +229,27 @@ def test_desired_symbols_preserves_volume_rank_order_and_caps_to_max_rank():
     assert desired == list(ranked)[:7]
 
 
+def test_failed_first_entry_does_not_consume_selection_slot():
+    strat = create_strategy("trend_scanner", {"max_symbols": 5})
+    k = ("BTCUSDT", "long")
+    strat._stop[k] = Decimal("98")
+    strat._last_entry[k] = Decimal("100")
+    strat.on_open_outcome(
+        "BTCUSDT", PositionSide.LONG, success=False, first_entry=True
+    )
+    assert "BTCUSDT" not in strat._selected
+    assert k not in strat._stop
+    assert k not in strat._last_entry
+
+
+def test_successful_first_entry_adds_to_selection():
+    strat = create_strategy("trend_scanner", {"max_symbols": 5})
+    strat.on_open_outcome(
+        "BTCUSDT", PositionSide.LONG, success=True, first_entry=True
+    )
+    assert strat._selected == ["BTCUSDT"]
+
+
 def test_selection_snapshot_lists_remaining_universe_as_scanning():
     instruments = _multi_instruments(7)
     strat = create_strategy(

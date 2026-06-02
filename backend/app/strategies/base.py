@@ -18,6 +18,7 @@ from app.domain.types import (
     AccountState,
     Instrument,
     MarketEvent,
+    PositionSide,
     ProtectionPlan,
     TradeIntent,
 )
@@ -98,6 +99,17 @@ class Strategy(abc.ABC):
         instrument: Instrument,
     ) -> ProtectionPlan | None:
         """Optional TP/SL ladder for exchange placement after entry (live only)."""
+        return None
+
+    def on_open_outcome(
+        self,
+        symbol: str,
+        position_side: PositionSide,
+        *,
+        success: bool,
+        first_entry: bool,
+    ) -> None:
+        """Hook after the engine attempts a first ladder open (``entry_1`` tag)."""
         return None
 
     def drain_scan_logs(self) -> list[dict]:

@@ -29,6 +29,7 @@ from app.domain.types import (
     AccountState,
     Bar,
     Instrument,
+    IntentAction,
     MarketEvent,
     MarketEventType,
     Mode,
@@ -259,7 +260,7 @@ class Engine:
         await self._flush_strategy_logs()
 
         # 3-4) size + submit each intent
-        await self._process_intents(intents, instruments, summary)
+        await self._process_intents(intents, instruments, summary, ctx)
 
         # 5) refresh dynamic coin selection (may grow the watchlist)
         await self._refresh_selection(ctx)
@@ -276,6 +277,7 @@ class Engine:
         intents: list,
         instruments: dict[str, Instrument],
         summary: EngineSummary,
+        ctx: StrategyContext | None = None,
     ) -> None:
         for intent in intents:
             await self._emit_signal(intent)
@@ -314,9 +316,21 @@ class Engine:
             )
             account = await self.broker.account()  # refresh between intents
             result = self.sizer.size(intent, account, instrument, price)
+            first_entry = (
+                intent.action is IntentAction.OPEN and intent.tag == "entry_1"
+            )
             if not result.ok or result.request is None:
                 summary.rejected += 1
                 await self._emit_signal_rejection(intent, result.reason)
+                if first_entry:
+                    self.strategy.on_open_outcome(
+                        intent.symbol,
+                        intent.position_side,
+                        success=False,
+                        first_entry=True,
+                    )
+                    if ctx is not None:
+                        await self._refresh_selection(ctx)
                 continue
             order = await self.broker.submit(result.request)
             await self._emit_order(order)
@@ -338,6 +352,15 @@ class Engine:
             summary.orders += 1
             if order.status is not OrderStatus.FILLED:
                 await self._emit_symbol_summary(order.symbol, status="pending_order")
+                if first_entry:
+                    self.strategy.on_open_outcome(
+                        intent.symbol,
+                        intent.position_side,
+                        success=False,
+                        first_entry=True,
+                    )
+                    if ctx is not None:
+                        await self._refresh_selection(ctx)
             if order.status is OrderStatus.FILLED:
                 summary.fills += len(order.fills)
                 for fill in order.fills:
@@ -374,6 +397,15 @@ class Engine:
                     source="order",
                 )
                 await self._emit_symbol_summary(order.symbol, status="in_position")
+                if first_entry:
+                    self.strategy.on_open_outcome(
+                        intent.symbol,
+                        intent.position_side,
+                        success=True,
+                        first_entry=True,
+                    )
+                    if ctx is not None:
+                        await self._refresh_selection(ctx)
                 if self.mode is Mode.LIVE and instrument is not None:
                     plan = self.strategy.protection_plan(
                         order.symbol,
@@ -486,7 +518,7 @@ class Engine:
                 )
                 intents = self.strategy.on_event(ctx)
                 await self._flush_strategy_logs()
-                await self._process_intents(intents, instruments, summary)
+                await self._process_intents(intents, instruments, summary, ctx)
                 await self._refresh_selection(ctx)
             if scanned % cadence == 0:
                 await self._emit_log(

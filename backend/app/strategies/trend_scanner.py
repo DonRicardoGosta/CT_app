@@ -32,6 +32,7 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 
 from app.domain.types import (
+    AccountState,
     Instrument,
     IntentAction,
     PositionSide,
@@ -174,6 +175,27 @@ class TrendScannerStrategy(Strategy):
         """True once we have committed to the maximum number of coins."""
         return len(self._selected) >= self.p.max_symbols
 
+    def on_open_outcome(
+        self,
+        symbol: str,
+        position_side: PositionSide,
+        *,
+        success: bool,
+        first_entry: bool,
+    ) -> None:
+        if not first_entry:
+            return
+        if success:
+            self._ensure_selected(symbol)
+            return
+        k = _key(symbol, position_side)
+        self._last_entry.pop(k, None)
+        self._tps_hit.pop(k, None)
+        self._stop.pop(k, None)
+        self._best.pop(k, None)
+        if symbol in self._selected:
+            self._selected.remove(symbol)
+
     def _required_history(self) -> int:
         return max(self.p.ema_slow, self.p.trend_ema, self.p.rsi_period) + 1
 
@@ -200,8 +222,16 @@ class TrendScannerStrategy(Strategy):
             {"message": message, "symbol": symbol or None, "severity": "info", "context": ctx}
         )
 
-    def _slot_free(self) -> bool:
-        return len(self._selected) < self.p.max_symbols
+    def _symbols_with_open_position(self, account: AccountState) -> set[str]:
+        return {
+            pos.symbol
+            for pos in account.positions.values()
+            if pos.qty > 0
+        }
+
+    def _slot_free(self, account: AccountState) -> bool:
+        occupied = set(self._selected) | self._symbols_with_open_position(account)
+        return len(occupied) < self.p.max_symbols
 
     def _ensure_selected(self, symbol: str) -> None:
         if symbol not in self._selected:
@@ -253,7 +283,7 @@ class TrendScannerStrategy(Strategy):
                 {**ctx_base, "check": "selected_waiting"},
             )
 
-        if not self._slot_free():
+        if not self._slot_free(context.account):
             return (
                 f"slots full ({len(self._selected)}/{self.p.max_symbols} coins selected)",
                 {
@@ -443,13 +473,17 @@ class TrendScannerStrategy(Strategy):
         if long_regime:
             side = PositionSide.LONG
             pos = context.account.position(symbol, side)
-            entry = self._entry_intent(symbol, side, pos, price, cur_rsi, prev_rsi)
+            entry = self._entry_intent(
+                symbol, side, pos, price, cur_rsi, prev_rsi, context.account
+            )
             if entry is not None:
                 intents.append(entry)
         elif short_regime:
             side = PositionSide.SHORT
             pos = context.account.position(symbol, side)
-            entry = self._entry_intent(symbol, side, pos, price, cur_rsi, prev_rsi)
+            entry = self._entry_intent(
+                symbol, side, pos, price, cur_rsi, prev_rsi, context.account
+            )
             if entry is not None:
                 intents.append(entry)
 
@@ -467,13 +501,15 @@ class TrendScannerStrategy(Strategy):
         price: Decimal,
         cur_rsi: Decimal,
         prev_rsi: Decimal,
+        account: AccountState,
     ) -> TradeIntent | None:
         steps = pos.step_count if pos is not None else 0
         if steps >= self.p.max_entries:
             return None
 
-        # A coin can only be traded if it is already selected or a slot is free.
-        if symbol not in self._selected and not self._slot_free():
+        has_position = symbol in self._symbols_with_open_position(account)
+        # A slot is only consumed after a successful first fill (see on_open_outcome).
+        if symbol not in self._selected and not has_position and not self._slot_free(account):
             return None
 
         if steps == 0:
@@ -498,7 +534,6 @@ class TrendScannerStrategy(Strategy):
             if not pulled_back:
                 return None
 
-        self._ensure_selected(symbol)
         self._last_entry[_key(symbol, side)] = price
         if steps == 0:
             # Reset per-trade state on the first entry.
