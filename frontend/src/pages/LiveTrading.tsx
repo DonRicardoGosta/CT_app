@@ -1,4 +1,5 @@
 // Realtime trading view (WS-driven). Positions, orders, fills and signals live.
+import StrategyPlanView from "@/components/StrategyPlanView";
 import { useRealtime } from "@/store/realtime";
 import { Badge, Card, CardTitle, Empty, Table, Td, Tr } from "@/components/ui";
 import { num, pnlClass, time, usd } from "@/lib/format";
@@ -9,6 +10,7 @@ export default function LiveTrading() {
 
   return (
     <div className="space-y-5">
+      <StrategyPlanView />
       <Card>
         <CardTitle right={<Badge tone="accent">{posList.length} open</Badge>}>
           Open positions

@@ -8,7 +8,8 @@ export type Channel =
   | "signal"
   | "equity"
   | "error"
-  | "run";
+  | "run"
+  | "strategy_plan";
 
 export interface RealtimeEvent {
   type: Channel | "hello";

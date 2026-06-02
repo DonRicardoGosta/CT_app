@@ -89,7 +89,17 @@ export const endpoints = {
   orders: (runId?: string) => api.get<any[]>(`/history/orders${runId ? `?run_id=${runId}` : ""}`),
   fills: (runId?: string) => api.get<any[]>(`/history/fills${runId ? `?run_id=${runId}` : ""}`),
   equity: (runId: string) => api.get<any[]>(`/history/equity?run_id=${runId}`),
-  errors: () => api.get<any[]>("/history/errors"),
+  errors: (runId?: string) =>
+    api.get<any[]>(`/history/errors${runId ? `?run_id=${runId}` : ""}`),
+  systemStatus: () =>
+    api.get<{
+      api: string;
+      control_bus: boolean;
+      realtime_hub: boolean;
+      recent_runs: RunRow[];
+      hints: string[];
+    }>("/system/status"),
+  health: () => fetch("/health").then((r) => r.json() as Promise<{ status: string }>),
   startRun: (b: unknown) => api.post<{ run_id: string; mode: string }>("/control/start", b),
   stopRun: (runId: string) => api.post<{ run_id: string }>(`/control/stop/${runId}`),
 };

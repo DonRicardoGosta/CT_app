@@ -7,6 +7,34 @@ import { realtime, type RealtimeEvent, type Status } from "@/lib/ws";
 const MAX_FEED = 200;
 const MAX_CURVE = 1000;
 
+export interface CoinPlanRow {
+  symbol: string;
+  price: string;
+  trend: string;
+  direction: string;
+  leverage: number;
+  stop_loss_price: string;
+  take_profit_price: string;
+  stop_loss_pct_margin: string;
+  take_profit_pct_margin: string;
+  ladder_step: number;
+  ladder_max: number;
+  open_status: string;
+  next_open_price: string;
+  next_open_reason: string;
+  position_qty: string;
+  entry_price: string;
+  bars: unknown[];
+}
+
+export interface StrategyPlanState {
+  selected_symbols: string[];
+  leverage: number;
+  stop_loss_pct_margin: string;
+  take_profit_pct_margin: string;
+  coins: CoinPlanRow[];
+}
+
 export interface PositionRow {
   symbol: string;
   position_side: string;
@@ -26,11 +54,13 @@ interface RealtimeState {
   positions: Record<string, PositionRow>;
   equity: RealtimeEvent | null;
   equityCurve: { ts: number; equity: number }[];
+  runEquity: Record<string, { ts: number; equity: number }[]>;
   fills: RealtimeEvent[];
   orders: RealtimeEvent[];
   signals: RealtimeEvent[];
   errors: RealtimeEvent[];
   runs: RealtimeEvent[];
+  strategyPlan: StrategyPlanState | null;
   setStatus: (s: Status) => void;
   ingest: (e: RealtimeEvent) => void;
   reset: () => void;
@@ -45,14 +75,27 @@ export const useRealtime = create<RealtimeState>((set) => ({
   positions: {},
   equity: null,
   equityCurve: [],
+  runEquity: {},
   fills: [],
   orders: [],
   signals: [],
   errors: [],
   runs: [],
+  strategyPlan: null,
   setStatus: (s) => set({ status: s }),
   reset: () =>
-    set({ positions: {}, equity: null, equityCurve: [], fills: [], orders: [], signals: [], errors: [], runs: [] }),
+    set({
+      positions: {},
+      equity: null,
+      equityCurve: [],
+      fills: [],
+      orders: [],
+      signals: [],
+      errors: [],
+      runs: [],
+      strategyPlan: null,
+      runEquity: {},
+    }),
   ingest: (e) =>
     set((state) => {
       switch (e.type) {
@@ -67,7 +110,13 @@ export const useRealtime = create<RealtimeState>((set) => ({
           const eq = parseFloat(String(e.equity));
           const ts = new Date(String(e.ts)).getTime();
           const curve = [...state.equityCurve, { ts, equity: eq }].slice(-MAX_CURVE);
-          return { equity: e, equityCurve: curve };
+          const rid = e.run_id ? String(e.run_id) : "";
+          const runEquity = { ...state.runEquity };
+          if (rid) {
+            const prev = runEquity[rid] ?? [];
+            runEquity[rid] = [...prev, { ts, equity: eq }].slice(-MAX_CURVE);
+          }
+          return { equity: e, equityCurve: curve, runEquity };
         }
         case "fill":
           return { fills: prepend(state.fills, e) };
@@ -79,6 +128,16 @@ export const useRealtime = create<RealtimeState>((set) => ({
           return { errors: prepend(state.errors, e) };
         case "run":
           return { runs: prepend(state.runs, e) };
+        case "strategy_plan":
+          return {
+            strategyPlan: {
+              selected_symbols: (e.selected_symbols as string[]) ?? [],
+              leverage: Number(e.leverage ?? 1),
+              stop_loss_pct_margin: String(e.stop_loss_pct_margin ?? ""),
+              take_profit_pct_margin: String(e.take_profit_pct_margin ?? ""),
+              coins: (e.coins as CoinPlanRow[]) ?? [],
+            },
+          };
         default:
           return {};
       }
@@ -94,5 +153,15 @@ export function initRealtime() {
   realtime.onStatus((s) => useRealtime.getState().setStatus(s));
   realtime.onEvent((e) => useRealtime.getState().ingest(e));
   realtime.connect();
-  realtime.subscribe(["order", "fill", "position", "signal", "equity", "error", "run"]);
+  realtime.subscribe([
+    "order",
+    "fill",
+    "position",
+    "signal",
+    "equity",
+    "error",
+    "run",
+    "strategy_plan",
+  ]);
+  // run_id filter is set per-page via realtime.setRun(runId)
 }

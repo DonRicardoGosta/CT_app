@@ -21,6 +21,15 @@ export function pct(value: unknown, digits = 2): string {
   return `${num(n, digits)}%`;
 }
 
+/** Convert ``<input type="datetime-local">`` value to ISO UTC for the API. */
+export function toIsoDateTime(value: string): string | undefined {
+  if (!value.trim()) return undefined;
+  const normalized = value.includes("T") ? value : `${value}T00:00:00`;
+  const d = new Date(normalized);
+  if (isNaN(d.getTime())) return undefined;
+  return d.toISOString();
+}
+
 export function time(value: unknown): string {
   if (!value) return "-";
   const d = new Date(String(value));

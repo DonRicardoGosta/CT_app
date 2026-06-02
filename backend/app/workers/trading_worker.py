@@ -34,7 +34,7 @@ async def run() -> None:
         [topics.control],
         settings.kafka_bootstrap_servers,
         group_id="trading-worker",
-        auto_offset_reset="latest",
+        auto_offset_reset="earliest",
     )
     await consumer.start()
     log.info("trading_worker_started")

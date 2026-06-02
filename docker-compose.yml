@@ -90,5 +90,16 @@ services:
       backend-api:
         condition: service_started
 
+  db-tunnel:
+    image: ngrok/ngrok:latest
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+    command: tcp postgres:5432 --log stdout
+    ports:
+      - "4040:4040"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:
