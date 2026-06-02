@@ -242,6 +242,51 @@ def test_failed_first_entry_does_not_consume_selection_slot():
     assert k not in strat._last_entry
 
 
+def test_release_symbol_frees_watchlist_slot(btc_instrument):
+    from app.domain.types import AccountState
+
+    strat = create_strategy("trend_scanner", {"max_symbols": 5})
+    strat._ensure_selected("BTCUSDT")
+    strat._ensure_selected("ETHUSDT")
+    empty = AccountState(ts=_EPOCH, balance=Decimal("1000"), positions={})
+    assert strat.release_symbol("BTCUSDT", empty) is True
+    assert "BTCUSDT" not in strat._selected
+    assert len(strat._selected) == 1
+    assert strat._slot_free(empty) is True
+
+
+def test_release_symbol_keeps_coin_when_position_open():
+    from app.domain.types import AccountState, Position
+
+    strat = create_strategy("trend_scanner", {"max_symbols": 5})
+    strat._ensure_selected("BTCUSDT")
+    acct = AccountState(
+        ts=_EPOCH,
+        balance=Decimal("1000"),
+        positions={
+            ("BTCUSDT", PositionSide.LONG): Position(
+                symbol="BTCUSDT",
+                position_side=PositionSide.LONG,
+                qty=Decimal("1"),
+                entry_price=Decimal("100"),
+                leverage=5,
+            )
+        },
+    )
+    assert strat.release_symbol("BTCUSDT", acct) is False
+    assert "BTCUSDT" in strat._selected
+
+
+def test_next_scan_candidate_skips_selected():
+    instruments = _multi_instruments(5)
+    strat = create_strategy("trend_scanner", {"max_scan_rank": 5, "max_symbols": 5})
+    strat.desired_symbols(instruments)
+    strat._ensure_selected(list(instruments)[0])
+    nxt = strat.next_scan_candidate()
+    assert nxt is not None
+    assert nxt not in strat._selected
+
+
 def test_successful_first_entry_adds_to_selection():
     strat = create_strategy("trend_scanner", {"max_symbols": 5})
     strat.on_open_outcome(

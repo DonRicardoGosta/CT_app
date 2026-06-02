@@ -112,6 +112,18 @@ class Strategy(abc.ABC):
         """Hook after the engine attempts a first ladder open (``entry_1`` tag)."""
         return None
 
+    def is_full(self) -> bool:
+        """True when the strategy will not accept more watchlist slots."""
+        return False
+
+    def release_symbol(self, symbol: str, account: AccountState) -> bool:
+        """Drop a symbol from the active watchlist when it has no open position."""
+        return False
+
+    def next_scan_candidate(self) -> str | None:
+        """Next universe symbol to evaluate for filling a free watchlist slot."""
+        return None
+
     def drain_scan_logs(self) -> list[dict]:
         """Optional scan diagnostics for the Logs UI.
 

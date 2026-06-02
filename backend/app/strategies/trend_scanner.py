@@ -146,6 +146,7 @@ class TrendScannerStrategy(Strategy):
         self._pending_logs: list[dict] = []
         self._last_scan_reason: dict[str, str] = {}
         self._exchange_protections = False
+        self._scan_cursor = 0
 
     async def on_start(self, context: StrategyContext) -> None:
         self._exchange_protections = context.exchange_protections
@@ -229,9 +230,35 @@ class TrendScannerStrategy(Strategy):
             if pos.qty > 0
         }
 
+    def _symbol_is_flat(self, symbol: str, account: AccountState) -> bool:
+        return symbol not in self._symbols_with_open_position(account)
+
     def _slot_free(self, account: AccountState) -> bool:
-        occupied = set(self._selected) | self._symbols_with_open_position(account)
-        return len(occupied) < self.p.max_symbols
+        return len(self._selected) < self.p.max_symbols
+
+    def release_symbol(self, symbol: str, account: AccountState) -> bool:
+        """Free a watchlist slot when the symbol has no open position."""
+        if not self._symbol_is_flat(symbol, account):
+            return False
+        if symbol not in self._selected:
+            return False
+        self._selected.remove(symbol)
+        for side in (PositionSide.LONG, PositionSide.SHORT):
+            self._reset_trade(_key(symbol, side))
+        return True
+
+    def next_scan_candidate(self) -> str | None:
+        """Return the next ranked coin not on the watchlist (round-robin)."""
+        if self.is_full() or not self._universe:
+            return None
+        total = len(self._universe)
+        for offset in range(total):
+            idx = (self._scan_cursor + offset) % total
+            symbol = self._universe[idx]
+            if symbol not in self._selected:
+                self._scan_cursor = (idx + 1) % total
+                return symbol
+        return None
 
     def _ensure_selected(self, symbol: str) -> None:
         if symbol not in self._selected:
@@ -507,9 +534,8 @@ class TrendScannerStrategy(Strategy):
         if steps >= self.p.max_entries:
             return None
 
-        has_position = symbol in self._symbols_with_open_position(account)
         # A slot is only consumed after a successful first fill (see on_open_outcome).
-        if symbol not in self._selected and not has_position and not self._slot_free(account):
+        if symbol not in self._selected and not self._slot_free(account):
             return None
 
         if steps == 0:

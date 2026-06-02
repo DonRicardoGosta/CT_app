@@ -111,6 +111,8 @@ class Engine:
         self._target = 0
         self._interval = interval
         self._scanned_once = False
+        self._symbols_with_open: set[str] = set()
+        self._in_replacement_scan = False
 
     def _strategy_context(
         self,
@@ -261,6 +263,11 @@ class Engine:
 
         # 3-4) size + submit each intent
         await self._process_intents(intents, instruments, summary, ctx)
+
+        account_after = await self.broker.account()
+        await self._handle_released_positions(
+            account_after, instruments, summary, ctx
+        )
 
         # 5) refresh dynamic coin selection (may grow the watchlist)
         await self._refresh_selection(ctx)
@@ -432,16 +439,120 @@ class Engine:
                             },
                         )
 
+    def _open_symbols(self, account: AccountState) -> set[str]:
+        return {
+            pos.symbol for pos in account.positions.values() if pos.qty > 0
+        }
+
+    async def _handle_released_positions(
+        self,
+        account: AccountState,
+        instruments: dict[str, Instrument],
+        summary: EngineSummary,
+        ctx: StrategyContext,
+    ) -> None:
+        """When a symbol goes fully flat, drop it from the watchlist and scan replacements."""
+        if self.mode is Mode.BACKTEST or self._history is None:
+            return
+        current = self._open_symbols(account)
+        closed = self._symbols_with_open - current
+        self._symbols_with_open = current
+        if self._in_replacement_scan:
+            return
+        if not closed:
+            return
+        released: list[str] = []
+        for symbol in sorted(closed):
+            release = getattr(self.strategy, "release_symbol", None)
+            if release is None:
+                continue
+            if release(symbol, account):
+                released.append(symbol)
+        if not released:
+            return
+        await self._refresh_selection(ctx)
+        await self._emit_log(
+            "engine",
+            "info",
+            f"position closed — scanning for {len(released)} replacement coin(s)",
+            context={"released": released, "selected": list(self._selected)},
+        )
+        await self._scan_for_replacements(instruments, summary)
+
+    async def _scan_for_replacements(
+        self, instruments: dict[str, Instrument], summary: EngineSummary
+    ) -> None:
+        """Fill free watchlist slots by evaluating ranked universe candidates."""
+        if self.mode is Mode.BACKTEST or self._history is None:
+            return
+        is_full = getattr(self.strategy, "is_full", None)
+        next_candidate = getattr(self.strategy, "next_scan_candidate", None)
+        if is_full is None or next_candidate is None:
+            return
+        universe_len = len(getattr(self.strategy, "_universe", []))
+        if universe_len == 0:
+            return
+        self._in_replacement_scan = True
+        try:
+            tried = 0
+            while not is_full() and tried < universe_len:
+                symbol = next_candidate()
+                if symbol is None:
+                    break
+                tried += 1
+                await self._evaluate_symbol_scan(symbol, instruments, summary)
+                account = await self.broker.account()
+                ctx = self._strategy_context(
+                    event=MarketEvent(
+                        type=MarketEventType.TICK, ts=self.clock.now(), symbol=""
+                    ),
+                    account=account,
+                    instruments=instruments,
+                    interval=self._interval,
+                )
+                await self._refresh_selection(ctx)
+        finally:
+            self._in_replacement_scan = False
+
+    async def _evaluate_symbol_scan(
+        self, symbol: str, instruments: dict[str, Instrument], summary: EngineSummary
+    ) -> None:
+        """Fetch history for one symbol and run the strategy (prescan / replacement)."""
+        warmup = max(int(getattr(self.strategy, "warmup_bars", lambda: 0)() or 0), 1)
+        bars = await self._fetch_history(symbol, warmup)
+        if not bars:
+            await self._emit_log(
+                "strategy",
+                "info",
+                f"scan {symbol}: no historical data, skipping",
+                context={"symbol": symbol, "check": "no_data"},
+            )
+            return
+        for bar in bars:
+            self.market.update_bar(bar)
+        last = bars[-1]
+        await self.broker.set_mark(symbol, last.close)
+        event = MarketEvent(
+            type=MarketEventType.BAR,
+            ts=last.open_time,
+            symbol=symbol,
+            bar=last,
+        )
+        acct = await self.broker.account()
+        ctx = self._strategy_context(
+            event=event,
+            account=acct,
+            instruments=instruments,
+            interval=self._interval,
+        )
+        intents = self.strategy.on_event(ctx)
+        await self._flush_strategy_logs()
+        await self._process_intents(intents, instruments, summary, ctx)
+
     async def _scan_and_select(
         self, instruments: dict[str, Instrument], summary: EngineSummary
     ) -> None:
-        """Walk the volume-ranked universe one coin at a time (live/dry).
-
-        For each coin: fetch its recent history, evaluate the strategy on it, log
-        the decision (entered / why not), and move on. Stops at ``max_symbols``
-        selected or when the universe is exhausted. Runs exactly once per engine,
-        so the search can never restart and overlap itself.
-        """
+        """Walk the volume-ranked universe once at startup (live/dry)."""
         if self._scanned_once:
             return
         self._scanned_once = True
@@ -458,13 +569,7 @@ class Engine:
         )
         await self.strategy.on_start(ctx0)
         self._universe = self.strategy.desired_symbols(instruments)
-        snap = self.strategy.selection_snapshot(ctx0)
-        self._selected = list(snap.get("selected", [])) if snap else []
-        self._target = int(snap.get("target", len(self._universe))) if snap else len(
-            self._universe
-        )
-        self._scanning = [s for s in self._universe if s not in self._selected]
-        await self._emit_watchlist()
+        await self._refresh_selection(ctx0)
         total = len(self._universe)
         await self._emit_log(
             "strategy",
@@ -474,13 +579,13 @@ class Engine:
             context={"total": total, "target": self._target, "interval": self._interval},
         )
 
-        warmup = max(int(getattr(self.strategy, "warmup_bars", lambda: 0)() or 0), 1)
+        is_full = getattr(self.strategy, "is_full", lambda: False)
         cadence = int(getattr(self.strategy.params, "scan_universe", 30) or 30)
         scanned = 0
         for symbol in self._universe:
             if self._stop:
                 break
-            if self._target and len(self._selected) >= self._target:
+            if is_full():
                 await self._emit_log(
                     "strategy",
                     "info",
@@ -490,36 +595,15 @@ class Engine:
                 )
                 break
             scanned += 1
-            bars = await self._fetch_history(symbol, warmup)
-            if not bars:
-                await self._emit_log(
-                    "strategy",
-                    "info",
-                    f"scan {symbol}: no historical data, skipping",
-                    context={"symbol": symbol, "check": "no_data"},
-                )
-            else:
-                for bar in bars:
-                    self.market.update_bar(bar)
-                last = bars[-1]
-                await self.broker.set_mark(symbol, last.close)
-                event = MarketEvent(
-                    type=MarketEventType.BAR,
-                    ts=last.open_time,
-                    symbol=symbol,
-                    bar=last,
-                )
-                acct = await self.broker.account()
-                ctx = self._strategy_context(
-                    event=event,
-                    account=acct,
-                    instruments=instruments,
-                    interval=self._interval,
-                )
-                intents = self.strategy.on_event(ctx)
-                await self._flush_strategy_logs()
-                await self._process_intents(intents, instruments, summary, ctx)
-                await self._refresh_selection(ctx)
+            await self._evaluate_symbol_scan(symbol, instruments, summary)
+            acct = await self.broker.account()
+            ctx_snap = self._strategy_context(
+                event=placeholder,
+                account=acct,
+                instruments=instruments,
+                interval=self._interval,
+            )
+            await self._refresh_selection(ctx_snap)
             if scanned % cadence == 0:
                 await self._emit_log(
                     "strategy",
@@ -534,6 +618,15 @@ class Engine:
                     },
                 )
 
+        account = await self.broker.account()
+        self._symbols_with_open = self._open_symbols(account)
+        ctx_end = self._strategy_context(
+            event=placeholder,
+            account=account,
+            instruments=instruments,
+            interval=self._interval,
+        )
+        await self._refresh_selection(ctx_end)
         await self._emit_log(
             "strategy",
             "info",
@@ -546,8 +639,6 @@ class Engine:
                 "target": self._target,
             },
         )
-        self._scanning = []
-        await self._emit_watchlist()
         if self._selected:
             await self._ensure_feed_symbols(self._selected)
         else:
@@ -677,18 +768,32 @@ class Engine:
         if snap is None:
             return
         selected = list(snap.get("selected", []))
-        if selected == self._selected:
-            return
+        scanning = list(snap.get("scanning", []))
+        target = int(snap.get("target", len(selected)))
         newly = [s for s in selected if s not in self._selected]
+        removed = [s for s in self._selected if s not in selected]
+        changed = newly or removed or scanning != self._scanning or target != self._target
+        if not changed:
+            return
         self._selected = selected
-        self._target = int(snap.get("target", len(selected)))
+        self._scanning = scanning
+        self._target = target
         await self._emit_watchlist()
+        if newly:
+            await self._ensure_feed_symbols(newly)
         for sym in newly:
             await self._emit_symbol_summary(sym, status="selected")
             await self._emit_log(
                 "engine",
                 "info",
                 f"coin selected for trading: {sym} ({len(selected)}/{self._target})",
+                context={"selected": selected, "target": self._target},
+            )
+        for sym in removed:
+            await self._emit_log(
+                "engine",
+                "info",
+                f"coin released from watchlist: {sym} ({len(selected)}/{self._target})",
                 context={"selected": selected, "target": self._target},
             )
 
