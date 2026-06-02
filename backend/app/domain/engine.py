@@ -230,6 +230,7 @@ class Engine:
             market=self.market,
         )
         intents = self.strategy.on_event(ctx)
+        await self._flush_strategy_logs()
 
         # 3-4) size + submit each intent
         for intent in intents:
@@ -332,6 +333,7 @@ class Engine:
 
         # 5) refresh dynamic coin selection (may grow the watchlist)
         await self._refresh_selection(ctx)
+        await self._flush_strategy_logs()
         # 6) keep TP/SL overlays live for open positions on this symbol
         if event.type is MarketEventType.BAR and event.bar is not None:
             await self._emit_open_levels(event.bar.symbol)
@@ -671,6 +673,19 @@ class Engine:
             return value
 
         return convert(context or {})
+
+    async def _flush_strategy_logs(self) -> None:
+        for entry in self.strategy.drain_scan_logs():
+            ctx = dict(entry.get("context") or {})
+            symbol = entry.get("symbol")
+            if symbol and "symbol" not in ctx:
+                ctx["symbol"] = symbol
+            await self._emit_log(
+                "strategy",
+                str(entry.get("severity", "info")),
+                str(entry["message"]),
+                context=ctx,
+            )
 
     async def _emit_log(
         self,

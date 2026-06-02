@@ -16,7 +16,19 @@ const RANGES: { key: RangeKey; label: string; ms: number | null }[] = [
   { key: "all", label: "All", ms: null },
 ];
 
-const SOURCES = ["all", "engine", "run", "signal", "order", "fill", "risk", "builder", "run_manager", "trading_worker"];
+const SOURCES = [
+  "all",
+  "engine",
+  "strategy",
+  "run",
+  "signal",
+  "order",
+  "fill",
+  "risk",
+  "builder",
+  "run_manager",
+  "trading_worker",
+];
 const SEVERITIES = ["all", "info", "warn", "error"];
 
 function severityTone(sev: string) {
@@ -27,7 +39,9 @@ function severityTone(sev: string) {
 }
 
 function logKey(row: LogRow): string {
-  return `${row.kind}|${row.ts}|${row.source}|${row.run_id ?? ""}|${row.symbol ?? ""}|${row.message}`;
+  const ts = new Date(row.ts);
+  const bucket = isFinite(ts.getTime()) ? Math.floor(ts.getTime() / 1000) : row.ts;
+  return `${row.run_id ?? ""}|${row.source}|${row.severity}|${row.symbol ?? ""}|${row.message}|${bucket}`;
 }
 
 function liveErrorToLog(e: any): LogRow {

@@ -18,7 +18,7 @@ from app.domain.engine import Engine
 from app.domain.feeds.replay import ReplayFeed
 from app.domain.types import Bar, Instrument, IntentAction, Mode, PositionSide
 from app.events.bus import InMemorySink
-from app.events.schemas import TradeLevelEvent, WatchlistEvent
+from app.events.schemas import ErrorEvent, TradeLevelEvent, WatchlistEvent
 from app.risk.config import RiskParams
 from app.risk.sizer import RiskSizer
 from app.strategies import create_strategy
@@ -130,6 +130,26 @@ async def _run(bars, instruments, sink, params=None):
         sink=sink,
     )
     return await engine.run(), strategy
+
+
+@pytest.mark.asyncio
+async def test_scan_diagnostic_logs_emitted():
+    bars = _uptrend_then_pullback(n=80)
+    instruments = _instruments()
+    sink = InMemorySink()
+    await _run(bars, instruments, sink)
+
+    scan_logs = [
+        e
+        for e in sink.events
+        if isinstance(e, ErrorEvent) and e.source == "strategy" and e.severity == "info"
+    ]
+    assert scan_logs, "strategy scan logs expected"
+    assert any("scan BTCUSDT" in log.message for log in scan_logs)
+    assert any(
+        "warming up" in log.message or "no trend" in log.message or "RSI" in log.message
+        for log in scan_logs
+    )
 
 
 @pytest.mark.asyncio

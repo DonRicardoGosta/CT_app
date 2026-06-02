@@ -84,6 +84,14 @@ class Strategy(abc.ABC):
         """
         return None
 
+    def drain_scan_logs(self) -> list[dict]:
+        """Optional scan diagnostics for the Logs UI.
+
+        Strategies queue human-readable messages here (e.g. why a coin failed a
+        check). The engine emits them with source ``strategy`` after each bar.
+        """
+        return []
+
     @abc.abstractmethod
     def on_event(self, context: StrategyContext) -> list[TradeIntent]:
         """Return the intents to act on for this market event (pure, no I/O)."""
