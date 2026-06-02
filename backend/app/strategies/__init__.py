@@ -6,7 +6,10 @@ A strategy is a pure decision function over market state and portfolio: it retur
 auto-generate their configuration form (JSON schema).
 """
 
-from app.strategies import autoscan_ladder  # noqa: F401 - register built-in strategy
+from app.strategies import (
+    autoscan_ladder,  # noqa: F401 - register strategy
+    trend_scanner,  # noqa: F401 - register strategy
+)
 from app.strategies.base import Strategy, StrategyContext
 from app.strategies.registry import (
     available_strategies,

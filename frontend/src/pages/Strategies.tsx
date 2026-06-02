@@ -29,9 +29,9 @@ export default function Strategies() {
   });
   const [result, setResult] = useState<string>("");
 
-  // Pick the first strategy + its defaults when schemas load.
+  // Pick the recommended strategy (trend_scanner) + its defaults when schemas load.
   if (!strategy && names.length) {
-    const first = names[0];
+    const first = names.includes("trend_scanner") ? "trend_scanner" : names[0];
     setStrategy(first);
     setParams(defaultsFromSchema(schemas![first]));
   }

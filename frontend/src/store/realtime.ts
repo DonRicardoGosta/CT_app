@@ -30,6 +30,8 @@ export interface TradeLevel {
   actual_entry?: string;
   take_profit?: string;
   stop_loss?: string;
+  take_profits?: string[];
+  stops?: string[];
   source?: string;
 }
 
@@ -65,6 +67,9 @@ interface RealtimeState {
   runs: RealtimeEvent[];
   // Trading workspace state
   watchlist: string[];
+  watchScanning: string[];
+  watchTarget: number;
+  watchComplete: boolean;
   watchInterval: string;
   prices: Record<string, number>;
   tradeLevels: Record<string, TradeLevel>;
@@ -95,6 +100,9 @@ function appendCandle(list: LiveCandle[] | undefined, e: RealtimeEvent): LiveCan
 
 const EMPTY_WORKSPACE = {
   watchlist: [] as string[],
+  watchScanning: [] as string[],
+  watchTarget: 0,
+  watchComplete: false,
   watchInterval: "1m",
   prices: {} as Record<string, number>,
   tradeLevels: {} as Record<string, TradeLevel>,
@@ -185,12 +193,23 @@ export const useRealtime = create<RealtimeState>((set) => ({
           ] as const) {
             if (e[k] != null) (merged as any)[k] = String(e[k]);
           }
+          if (Array.isArray(e.take_profits)) {
+            merged.take_profits = (e.take_profits as unknown[]).map(String);
+          }
+          if (Array.isArray(e.stops)) {
+            merged.stops = (e.stops as unknown[]).map(String);
+          }
           return { tradeLevels: { ...state.tradeLevels, [symbol]: merged } };
         }
         case "watchlist": {
           const symbols = (e.symbols as string[]) ?? [];
+          const scanning = (e.scanning as string[]) ?? [];
+          const target = Number(e.target ?? symbols.length);
           return {
             watchlist: symbols,
+            watchScanning: scanning,
+            watchTarget: target,
+            watchComplete: Boolean(e.complete),
             watchInterval: String(e.interval ?? "1m"),
           };
         }

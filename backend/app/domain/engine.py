@@ -99,7 +99,10 @@ class Engine:
         self.run_id = run_id or uuid.uuid4().hex
         self.market = MarketState(max_history=max_history)
         self._stop = False
-        self._watch_symbols: list[str] = []
+        self._universe: list[str] = []
+        self._selected: list[str] = []
+        self._scanning: list[str] = []
+        self._target = 0
         self._interval = "1m"
 
     def request_stop(self) -> None:
@@ -168,16 +171,34 @@ class Engine:
         await self.strategy.on_start(ctx)
         if event.bar is not None:
             self._interval = event.bar.interval
-        self._watch_symbols = self.strategy.desired_symbols(instruments)
+        self._universe = self.strategy.desired_symbols(instruments)
+
+        snap = self.strategy.selection_snapshot(ctx)
+        if snap is None:
+            # Strategy does not do dynamic selection: the whole universe is the
+            # tradeable set and the watchlist is complete immediately.
+            self._selected = list(self._universe)
+            self._scanning = []
+            self._target = len(self._universe)
+        else:
+            self._selected = list(snap.get("selected", []))
+            self._scanning = list(snap.get("scanning", self._universe))
+            self._target = int(snap.get("target", len(self._selected)))
+
         await self._emit_watchlist()
         await self._emit_log(
             "engine",
             "info",
-            "watchlist selected",
-            context={"symbols": self._watch_symbols, "interval": self._interval},
+            f"scanning {len(self._scanning) + len(self._selected)} coins "
+            f"for setups (target {self._target})",
+            context={
+                "selected": self._selected,
+                "target": self._target,
+                "interval": self._interval,
+            },
         )
-        for sym in self._watch_symbols:
-            await self._emit_symbol_summary(sym, status="scanning")
+        for sym in self._selected:
+            await self._emit_symbol_summary(sym, status="selected")
 
     async def _handle_event(
         self,
@@ -196,7 +217,7 @@ class Engine:
         await self._emit_market(event)
         if event.type is MarketEventType.BAR and event.bar is not None:
             await self._emit_candle(event.bar)
-            if not self._watch_symbols or event.bar.symbol in self._watch_symbols:
+            if event.bar.symbol in self._selected:
                 await self._emit_symbol_summary(event.bar.symbol)
 
         # 2) strategy decision (pure)
@@ -234,13 +255,16 @@ class Engine:
             if price is None:
                 continue
             leverage = self.sizer.params.base_leverage
+            tps, stops = self._levels(intent.symbol, intent.position_side, price, leverage)
+            if not stops and intent.stop_price is not None:
+                stops = [intent.stop_price]
             await self._emit_trade_level(
                 symbol=intent.symbol,
                 position_side=intent.position_side.value,
                 current_price=price,
                 planned_entry=price,
-                stop_loss=intent.stop_price,
-                take_profit=self._take_profit_price(price, intent.position_side, leverage),
+                take_profits=tps,
+                stops=stops,
                 source="strategy",
             )
             account = await self.broker.account()  # refresh between intents
@@ -290,20 +314,29 @@ class Engine:
                     )
                 await self._emit_positions_for(order.symbol)
                 entry = order.avg_fill_price or price
+                tps, stops = self._levels(
+                    order.symbol, order.position_side, entry, order.leverage
+                )
+                if not stops and result.request.stop_price is not None:
+                    stops = [result.request.stop_price]
                 await self._emit_trade_level(
                     symbol=order.symbol,
                     position_side=order.position_side.value,
                     current_price=self.market.last_price(order.symbol),
                     actual_entry=entry,
-                    stop_loss=result.request.stop_price,
-                    take_profit=self._take_profit_price(
-                        entry, order.position_side, order.leverage
-                    ),
+                    take_profits=tps,
+                    stops=stops,
                     source="order",
                 )
                 await self._emit_symbol_summary(order.symbol, status="in_position")
 
-        # 5) equity snapshot
+        # 5) refresh dynamic coin selection (may grow the watchlist)
+        await self._refresh_selection(ctx)
+        # 6) keep TP/SL overlays live for open positions on this symbol
+        if event.type is MarketEventType.BAR and event.bar is not None:
+            await self._emit_open_levels(event.bar.symbol)
+
+        # 7) equity snapshot
         await self._emit_equity()
 
     async def _finalize(self, summary: EngineSummary) -> None:
@@ -381,11 +414,67 @@ class Engine:
                 run_id=self.run_id,
                 mode=self.mode.value,
                 ts=self.clock.now(),
-                symbols=list(self._watch_symbols),
+                symbols=list(self._selected),
+                scanning=list(self._scanning),
+                target=self._target,
+                complete=len(self._selected) >= self._target > 0,
                 interval=self._interval,
                 strategy=self.strategy.name,
             )
         )
+
+    def _levels(
+        self, symbol: str, side: PositionSide, entry: Decimal, leverage: int
+    ) -> tuple[list[Decimal], list[Decimal]]:
+        """Resolve take-profit/stop price levels for a symbol via the strategy.
+
+        Falls back to a single leverage-adjusted TP when the strategy does not
+        expose multi-level data.
+        """
+        lv = self.strategy.position_levels(symbol, side, entry, leverage)
+        if lv is not None:
+            return list(lv.get("take_profits", [])), list(lv.get("stops", []))
+        tp = self._take_profit_price(entry, side, leverage)
+        return ([tp] if tp is not None else []), []
+
+    async def _refresh_selection(self, ctx: StrategyContext) -> None:
+        snap = self.strategy.selection_snapshot(ctx)
+        if snap is None:
+            return
+        selected = list(snap.get("selected", []))
+        if selected == self._selected:
+            return
+        newly = [s for s in selected if s not in self._selected]
+        self._selected = selected
+        self._scanning = list(snap.get("scanning", []))
+        self._target = int(snap.get("target", len(selected)))
+        await self._emit_watchlist()
+        for sym in newly:
+            await self._emit_symbol_summary(sym, status="selected")
+            await self._emit_log(
+                "engine",
+                "info",
+                f"coin selected for trading: {sym} ({len(selected)}/{self._target})",
+                context={"selected": selected, "target": self._target},
+            )
+
+    async def _emit_open_levels(self, symbol: str) -> None:
+        """Re-emit TP/SL overlays for any open position on ``symbol`` (live stop)."""
+        account = await self.broker.account()
+        price = self.market.last_price(symbol)
+        for (sym, side), pos in account.positions.items():
+            if sym != symbol or pos.qty <= 0:
+                continue
+            tps, stops = self._levels(sym, side, pos.entry_price, pos.leverage)
+            await self._emit_trade_level(
+                symbol=sym,
+                position_side=side.value,
+                current_price=price,
+                actual_entry=pos.entry_price,
+                take_profits=tps,
+                stops=stops,
+                source="position",
+            )
 
     async def _emit_trade_level(
         self,
@@ -397,8 +486,12 @@ class Engine:
         actual_entry: Decimal | None = None,
         take_profit: Decimal | None = None,
         stop_loss: Decimal | None = None,
+        take_profits: list[Decimal] | None = None,
+        stops: list[Decimal] | None = None,
         source: str = "engine",
     ) -> None:
+        tps = take_profits or ([take_profit] if take_profit is not None else [])
+        sls = stops or ([stop_loss] if stop_loss is not None else [])
         await self.sink.emit(
             TradeLevelEvent(
                 run_id=self.run_id,
@@ -409,8 +502,10 @@ class Engine:
                 current_price=current_price,
                 planned_entry=planned_entry,
                 actual_entry=actual_entry,
-                take_profit=take_profit,
-                stop_loss=stop_loss,
+                take_profit=tps[0] if tps else None,
+                stop_loss=sls[0] if sls else None,
+                take_profits=tps,
+                stops=sls,
                 source=source,
             )
         )

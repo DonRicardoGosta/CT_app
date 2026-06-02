@@ -121,7 +121,12 @@ class CandleEvent(BaseEvent):
 
 
 class TradeLevelEvent(BaseEvent):
-    """Chart overlay levels for planned/actual entry, TP and SL per symbol."""
+    """Chart overlay levels for planned/actual entry, TP and SL per symbol.
+
+    ``take_profit``/``stop_loss`` keep the single nearest level for backward
+    compatibility, while ``take_profits``/``stops`` carry all levels for strategies
+    that scale out at several targets and move their stop over a trade's life.
+    """
 
     type: Literal[EventType.TRADE_LEVEL] = EventType.TRADE_LEVEL
     symbol: str
@@ -131,14 +136,24 @@ class TradeLevelEvent(BaseEvent):
     actual_entry: Decimal | None = None
     take_profit: Decimal | None = None
     stop_loss: Decimal | None = None
+    take_profits: list[Decimal] = Field(default_factory=list)
+    stops: list[Decimal] = Field(default_factory=list)
     source: str = "engine"
 
 
 class WatchlistEvent(BaseEvent):
-    """The set of symbols the strategy selected for this run (emitted on start)."""
+    """The coins the strategy is trading + the ones it is still scanning.
+
+    ``symbols`` is the *selected* (tradeable) set. While the strategy is still
+    looking for setups, ``len(symbols) < target`` and ``complete`` is ``False`` so
+    the UI can show a "Selecting coins (N/target)" state.
+    """
 
     type: Literal[EventType.WATCHLIST] = EventType.WATCHLIST
     symbols: list[str] = Field(default_factory=list)
+    scanning: list[str] = Field(default_factory=list)
+    target: int = 0
+    complete: bool = False
     interval: str = "1m"
     strategy: str = ""
 

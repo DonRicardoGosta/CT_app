@@ -26,6 +26,11 @@ from app.strategies import create_strategy
 
 log = get_logger(__name__)
 
+# Auto-selected universes can be large (the scanner subscribes to many coins in
+# live/dry mode). Backtests fetch klines per symbol, so cap the auto set to keep
+# runs fast when no explicit symbols are given.
+BACKTEST_MAX_AUTO_SYMBOLS = 8
+
 
 async def _emit_builder_log(
     sink: EventSink,
@@ -83,11 +88,14 @@ async def build_engine(
         instruments = {}
 
     symbols = _resolve_symbols(config, strategy, instruments)
+    # Backtests load klines per symbol; cap the auto-selected universe.
+    if mode is Mode.BACKTEST and not config.symbols:
+        symbols = symbols[:BACKTEST_MAX_AUTO_SYMBOLS]
     await _emit_builder_log(
         sink,
         config,
         "info",
-        "symbols resolved",
+        f"resolved {len(symbols)} symbols",
         context={"symbols": symbols, "interval": config.interval},
     )
 

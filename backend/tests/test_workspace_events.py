@@ -76,7 +76,7 @@ async def test_workspace_events_emitted(bars, instruments):
 
     logs = of(ErrorEvent)
     assert any(log.severity == "info" and log.source == "engine" for log in logs)
-    assert any(log.message == "watchlist selected" for log in logs)
+    assert any("scanning" in log.message for log in logs)
 
 
 def test_take_profit_price_uses_leverage(instruments):

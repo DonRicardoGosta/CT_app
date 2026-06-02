@@ -22,6 +22,9 @@ export default function TradingWorkspace() {
   const {
     status,
     watchlist,
+    watchScanning,
+    watchTarget,
+    watchComplete,
     watchInterval,
     prices,
     tradeLevels,
@@ -33,16 +36,21 @@ export default function TradingWorkspace() {
     signals,
   } = useRealtime();
 
-  // Symbols to show: prefer the strategy watchlist, fall back to whatever we've seen.
+  // Selected (tradeable) coins. Fall back to whatever we've seen if a strategy
+  // does not publish a watchlist.
   const symbols = useMemo(() => {
-    if (watchlist.length) return watchlist.slice(0, 5);
+    if (watchlist.length) return watchlist;
     const seen = new Set([
       ...Object.keys(symbolSummaries),
       ...Object.keys(prices),
       ...Object.keys(liveCandles),
     ]);
-    return [...seen].sort().slice(0, 5);
-  }, [watchlist, symbolSummaries, prices, liveCandles]);
+    return [...seen].sort().slice(0, watchTarget || 5);
+  }, [watchlist, symbolSummaries, prices, liveCandles, watchTarget]);
+
+  const target = watchTarget || symbols.length || 5;
+  const runActive = symbols.length > 0 || watchScanning.length > 0 || watchTarget > 0;
+  const placeholders = Math.max(0, target - symbols.length);
 
   const [active, setActive] = useState<string>("");
   const [interval, setInterval] = useState<Interval>("5m");
@@ -83,6 +91,22 @@ export default function TradingWorkspace() {
 
   const level = tradeLevels[activeSymbol];
   const livePrice = prices[activeSymbol];
+  const tpList = (level?.take_profits?.length
+    ? level.take_profits
+    : level?.take_profit
+      ? [level.take_profit]
+      : []
+  )
+    .map(num0)
+    .filter((n) => isFinite(n));
+  const slList = (level?.stops?.length
+    ? level.stops
+    : level?.stop_loss
+      ? [level.stop_loss]
+      : []
+  )
+    .map(num0)
+    .filter((n) => isFinite(n));
   const chartLevels: ChartLevels = {
     price: livePrice ?? (level?.current_price ? num0(level.current_price) : undefined),
     entry: level?.actual_entry
@@ -90,8 +114,8 @@ export default function TradingWorkspace() {
       : level?.planned_entry
         ? num0(level.planned_entry)
         : undefined,
-    takeProfit: level?.take_profit ? num0(level.take_profit) : undefined,
-    stopLoss: level?.stop_loss ? num0(level.stop_loss) : undefined,
+    takeProfits: tpList,
+    stops: slList,
   };
 
   const activePosition = useMemo(() => {
@@ -108,7 +132,7 @@ export default function TradingWorkspace() {
     return ((last - first) / first) * 100;
   }, [candles, livePrice]);
 
-  if (!symbols.length) {
+  if (!runActive) {
     return (
       <Card>
         <CardTitle
@@ -122,7 +146,24 @@ export default function TradingWorkspace() {
           <Link to="/strategies" className="text-accent underline">
             Strategies
           </Link>{" "}
-          — the 5 selected coins, charts and levels appear here.
+          — the selected coins, charts and levels appear here.
+        </Empty>
+      </Card>
+    );
+  }
+
+  // Scanning but nothing selected yet.
+  if (!symbols.length) {
+    return (
+      <Card>
+        <CardTitle
+          right={<Badge tone="warn">Selecting coins (0/{target})</Badge>}
+        >
+          Scanning for tradeable coins
+        </CardTitle>
+        <Empty>
+          Searching {watchScanning.length || "the"} candidates for valid setups — coins
+          appear here as soon as the strategy can open a position in them.
         </Empty>
       </Card>
     );
@@ -144,23 +185,44 @@ export default function TradingWorkspace() {
         </Card>
       )}
 
-      {/* Coin strip */}
+      {/* Coin selection status */}
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium text-text">Coins</span>
+        {watchComplete ? (
+          <Badge tone="up">{symbols.length} selected</Badge>
+        ) : (
+          <Badge tone="warn">
+            Selecting coins ({symbols.length}/{target})
+            {watchScanning.length ? ` · scanning ${watchScanning.length}` : ""}
+          </Badge>
+        )}
+      </div>
+
+      {/* Coin strip: selected coins + searching placeholders */}
       <div className="flex flex-wrap gap-3">
         {symbols.map((sym) => {
           const spark = (liveCandles[sym] ?? []).map((b) => b.c);
-          const restSpark = spark.length ? spark : [];
           return (
             <MiniCoinCard
               key={sym}
               symbol={sym}
               active={sym === activeSymbol}
               price={prices[sym]}
-              spark={restSpark}
+              spark={spark}
               summary={symbolSummaries[sym]}
               onClick={() => setActive(sym)}
             />
           );
         })}
+        {Array.from({ length: placeholders }).map((_, i) => (
+          <div
+            key={`ph${i}`}
+            className="flex min-w-[150px] flex-1 flex-col items-center justify-center rounded-xl border border-dashed border-border bg-panel/40 p-3 text-center"
+          >
+            <span className="text-sm font-medium text-muted">Searching…</span>
+            <span className="mt-1 text-xs text-muted">slot {symbols.length + i + 1}/{target}</span>
+          </div>
+        ))}
       </div>
 
       {/* Main chart + position panel */}

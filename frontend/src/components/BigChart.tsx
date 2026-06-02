@@ -19,8 +19,8 @@ export interface Candle {
 export interface ChartLevels {
   price?: number;
   entry?: number;
-  takeProfit?: number;
-  stopLoss?: number;
+  takeProfits?: number[];
+  stops?: number[];
 }
 
 export default function BigChart({
@@ -102,9 +102,20 @@ export default function BigChart({
 
     add(levels?.price, "#9aa7b8", "PRICE", true);
     add(levels?.entry, "#3b82f6", "ENTRY", false);
-    add(levels?.takeProfit, "#16c784", "TP", true);
-    add(levels?.stopLoss, "#ea3943", "SL", true);
-  }, [levels?.price, levels?.entry, levels?.takeProfit, levels?.stopLoss]);
+    const tps = levels?.takeProfits ?? [];
+    tps.forEach((tp, i) =>
+      add(tp, "#16c784", tps.length > 1 ? `TP${i + 1}` : "TP", true),
+    );
+    const stops = levels?.stops ?? [];
+    stops.forEach((sl, i) =>
+      add(sl, "#ea3943", stops.length > 1 ? `SL${i + 1}` : "SL", true),
+    );
+  }, [
+    levels?.price,
+    levels?.entry,
+    JSON.stringify(levels?.takeProfits ?? []),
+    JSON.stringify(levels?.stops ?? []),
+  ]);
 
   return <div ref={containerRef} className="w-full" />;
 }

@@ -64,6 +64,26 @@ class Strategy(abc.ABC):
         """Optional hook before the first event."""
         return None
 
+    def selection_snapshot(self, context: StrategyContext) -> dict | None:
+        """Optional dynamic coin selection state for the UI.
+
+        Return ``{"selected": [...], "scanning": [...], "target": int}`` so the
+        frontend can show a "Selecting coins (N/target)" state until the strategy
+        has locked in its tradeable set. ``None`` means the strategy does not do
+        dynamic selection (the engine falls back to ``desired_symbols``).
+        """
+        return None
+
+    def position_levels(
+        self, symbol: str, side: object, entry_price: object, leverage: int
+    ) -> dict | None:
+        """Optional chart levels for a symbol: take-profits and stops.
+
+        Return ``{"take_profits": [Decimal, ...], "stops": [Decimal, ...]}`` as
+        price levels, or ``None`` to let the engine fall back to a single TP/SL.
+        """
+        return None
+
     @abc.abstractmethod
     def on_event(self, context: StrategyContext) -> list[TradeIntent]:
         """Return the intents to act on for this market event (pure, no I/O)."""

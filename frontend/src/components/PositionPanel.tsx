@@ -70,14 +70,50 @@ export default function PositionPanel({
                   : "—"}
             </span>
           </div>
-          <div className="flex items-center justify-between py-1 text-sm">
-            <span className="text-muted">Take profit</span>
-            <span className="num text-up">{level?.take_profit ? usd(level.take_profit) : "—"}</span>
-          </div>
-          <div className="flex items-center justify-between py-1 text-sm">
-            <span className="text-muted">Stop loss</span>
-            <span className="num text-down">{level?.stop_loss ? usd(level.stop_loss) : "—"}</span>
-          </div>
+
+          {(() => {
+            const tps = level?.take_profits?.length
+              ? level.take_profits
+              : level?.take_profit
+                ? [level.take_profit]
+                : [];
+            if (!tps.length) {
+              return (
+                <div className="flex items-center justify-between py-1 text-sm">
+                  <span className="text-muted">Take profit</span>
+                  <span className="num text-up">—</span>
+                </div>
+              );
+            }
+            return tps.map((tp, i) => (
+              <div key={`tp${i}`} className="flex items-center justify-between py-1 text-sm">
+                <span className="text-muted">{tps.length > 1 ? `Take profit ${i + 1}` : "Take profit"}</span>
+                <span className="num text-up">{usd(tp)}</span>
+              </div>
+            ));
+          })()}
+
+          {(() => {
+            const stops = level?.stops?.length
+              ? level.stops
+              : level?.stop_loss
+                ? [level.stop_loss]
+                : [];
+            if (!stops.length) {
+              return (
+                <div className="flex items-center justify-between py-1 text-sm">
+                  <span className="text-muted">Stop loss</span>
+                  <span className="num text-down">—</span>
+                </div>
+              );
+            }
+            return stops.map((sl, i) => (
+              <div key={`sl${i}`} className="flex items-center justify-between py-1 text-sm">
+                <span className="text-muted">{stops.length > 1 ? `Stop ${i + 1}` : "Stop loss"}</span>
+                <span className="num text-down">{usd(sl)}</span>
+              </div>
+            ));
+          })()}
         </div>
       </Card>
     </div>
