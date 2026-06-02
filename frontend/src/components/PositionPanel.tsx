@@ -12,6 +12,31 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
+function pct(value: number): string {
+  if (!isFinite(value)) return "—";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(2)}%`;
+}
+
+function tone(value: number): string {
+  if (!isFinite(value) || value === 0) return "text-muted";
+  return value > 0 ? "text-up" : "text-down";
+}
+
+// PnL (USD) and return-on-margin (%) for moving ``entry -> target`` with ``qty``.
+function pnlAt(
+  side: string,
+  entry: number,
+  qty: number,
+  margin: number,
+  target: number,
+): { usd: number; roe: number } {
+  const dir = side === "long" ? 1 : -1;
+  const pnl = (target - entry) * qty * dir;
+  const roe = margin > 0 ? (pnl / margin) * 100 : NaN;
+  return { usd: pnl, roe };
+}
+
 export default function PositionPanel({
   symbol,
   position,
@@ -40,20 +65,74 @@ export default function PositionPanel({
         {!position ? (
           <Empty>No open position</Empty>
         ) : (
-          <div className="divide-y divide-border/50">
-            <Row label="Qty">{num(position.qty, 4)}</Row>
-            <Row label="Entry">{usd(position.entry_price)}</Row>
-            <Row label="Mark">{usd(position.mark_price)}</Row>
-            <Row label="Leverage">{position.leverage}x</Row>
-            <Row label="Ladder steps">{position.step_count}</Row>
-            <Row label="Margin">{usd(position.margin)}</Row>
-            <div className="flex items-center justify-between py-1 text-sm">
-              <span className="text-muted">uPnL</span>
-              <span className={`num ${pnlClass(position.unrealized_pnl)}`}>
-                {usd(position.unrealized_pnl)}
-              </span>
-            </div>
-          </div>
+          (() => {
+            const side = position.position_side;
+            const entry = parseFloat(position.entry_price);
+            const qty = parseFloat(position.qty);
+            const margin = parseFloat(position.margin);
+            const upnl = parseFloat(position.unrealized_pnl);
+            const roe = margin > 0 ? (upnl / margin) * 100 : NaN;
+
+            const tps = level?.take_profits?.length
+              ? level.take_profits.map(Number)
+              : level?.take_profit
+                ? [Number(level.take_profit)]
+                : [];
+            const stops = level?.stops?.length
+              ? level.stops.map(Number)
+              : level?.stop_loss
+                ? [Number(level.stop_loss)]
+                : [];
+            // Furthest favourable TP and the widest (worst) stop.
+            const bestTarget = tps.length
+              ? side === "long"
+                ? Math.max(...tps)
+                : Math.min(...tps)
+              : null;
+            const worstStop = stops.length
+              ? side === "long"
+                ? Math.min(...stops)
+                : Math.max(...stops)
+              : null;
+            const best =
+              bestTarget != null ? pnlAt(side, entry, qty, margin, bestTarget) : null;
+            const worst =
+              worstStop != null ? pnlAt(side, entry, qty, margin, worstStop) : null;
+
+            return (
+              <div className="divide-y divide-border/50">
+                <Row label="Qty">{num(position.qty, 4)}</Row>
+                <Row label="Entry">{usd(position.entry_price)}</Row>
+                <Row label="Mark">{usd(position.mark_price)}</Row>
+                <Row label="Leverage">{position.leverage}x</Row>
+                <Row label="Ladder steps">{position.step_count}</Row>
+                <Row label="Margin">{usd(position.margin)}</Row>
+                <div className="flex items-center justify-between py-1 text-sm">
+                  <span className="text-muted">uPnL</span>
+                  <span className={`num ${pnlClass(position.unrealized_pnl)}`}>
+                    {usd(position.unrealized_pnl)}
+                    <span className={tone(roe)}> ({pct(roe)})</span>
+                  </span>
+                </div>
+                {best && (
+                  <div className="flex items-center justify-between py-1 text-sm">
+                    <span className="text-muted">Best case (all TP)</span>
+                    <span className="num text-up">
+                      {usd(best.usd)} ({pct(best.roe)})
+                    </span>
+                  </div>
+                )}
+                {worst && (
+                  <div className="flex items-center justify-between py-1 text-sm">
+                    <span className="text-muted">Worst case (stop)</span>
+                    <span className="num text-down">
+                      {usd(worst.usd)} ({pct(worst.roe)})
+                    </span>
+                  </div>
+                )}
+              </div>
+            );
+          })()
         )}
       </Card>
 
