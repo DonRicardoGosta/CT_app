@@ -116,7 +116,7 @@ export default function PositionPanel({
                 </div>
                 {best && (
                   <div className="flex items-center justify-between py-1 text-sm">
-                    <span className="text-muted">Best case (all TP)</span>
+                    <span className="text-muted">Max upside (final TP)</span>
                     <span className="num text-up">
                       {usd(best.usd)} ({pct(best.roe)})
                     </span>

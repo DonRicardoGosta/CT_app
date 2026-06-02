@@ -207,12 +207,13 @@ async def test_multi_level_trade_levels():
     assert any(len(lv.stops) >= 1 for lv in levels)
 
 
-def test_position_levels_uses_leverage():
-    strat = create_strategy("trend_scanner", {"tp1_roe_pct": "10", "tp2_roe_pct": "20"})
+def test_position_levels_are_price_based():
+    strat = create_strategy("trend_scanner", {"tp1_pct": "1", "tp2_pct": "2"})
     lv = strat.position_levels("BTCUSDT", PositionSide.LONG, Decimal("100"), 10)
     assert lv is not None
-    # 10% ROE at 10x -> 1% price move -> 101.0 for the first TP.
+    # TP1 is a 1% price move regardless of leverage -> 101.0.
     assert lv["take_profits"][0] == Decimal("101.0")
+    assert lv["take_profits"][1] == Decimal("102.0")
     assert lv["stops"], "an initial stop level must be present"
 
 

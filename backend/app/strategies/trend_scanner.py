@@ -85,19 +85,22 @@ class TrendScannerParams(BaseModel):
         description="Adverse price move (percent) required before adding the next entry.",
     )
 
-    # -- multiple take-profits (return on margin) --------------------------- #
-    tp1_roe_pct: Decimal = Field(default=Decimal("1.5"), description="TP1 ROE percent.")
-    tp1_close_pct: Decimal = Field(default=Decimal("40"), description="TP1 close % of position.")
-    tp2_roe_pct: Decimal = Field(default=Decimal("3.0"), description="TP2 ROE percent.")
-    tp2_close_pct: Decimal = Field(default=Decimal("50"), description="TP2 close % of remainder.")
-    tp3_roe_pct: Decimal = Field(default=Decimal("6.0"), description="TP3 ROE percent.")
+    # -- multiple take-profits (price move percent) ------------------------- #
+    # Targets are price-move percentages (not ROE), so they are leverage
+    # independent and directly comparable to the round-trip fee (~0.12% at a
+    # 0.06% taker fee). ROE shown in the UI = price move x leverage.
+    tp1_pct: Decimal = Field(default=Decimal("1.0"), description="TP1 price move percent.")
+    tp1_close_pct: Decimal = Field(default=Decimal("30"), description="TP1 close % of position.")
+    tp2_pct: Decimal = Field(default=Decimal("2.5"), description="TP2 price move percent.")
+    tp2_close_pct: Decimal = Field(default=Decimal("35"), description="TP2 close % of remainder.")
+    tp3_pct: Decimal = Field(default=Decimal("6.0"), description="TP3 price move percent.")
     tp3_close_pct: Decimal = Field(
         default=Decimal("100"), description="TP3 close % of remainder."
     )
 
     # -- stops --------------------------------------------------------------- #
     stop_loss_pct: Decimal = Field(
-        default=Decimal("2.0"), description="Initial stop distance (price percent)."
+        default=Decimal("1.2"), description="Initial stop distance (price percent)."
     )
     breakeven_after_tp: int = Field(
         default=1, ge=0, le=3, description="Move stop to breakeven after this many TPs hit (0=off)."
@@ -106,7 +109,7 @@ class TrendScannerParams(BaseModel):
         default=2, ge=0, le=3, description="Start trailing after this many TPs hit (0=off)."
     )
     trail_pct: Decimal = Field(
-        default=Decimal("1.2"), description="Trailing stop distance (percent) from the best price."
+        default=Decimal("1.5"), description="Trailing stop distance (percent) from the best price."
     )
 
     allow_hedge: bool = Field(
@@ -313,11 +316,11 @@ class TrendScannerStrategy(Strategy):
     # Take-profit / stop helpers
     # ------------------------------------------------------------------ #
     def _tp_levels(self) -> list[tuple[Decimal, Decimal]]:
-        """Return ``[(roe_pct, close_fraction_of_remainder), ...]``."""
+        """Return ``[(price_move_pct, close_fraction_of_remainder), ...]``."""
         return [
-            (self.p.tp1_roe_pct, self.p.tp1_close_pct / Decimal(100)),
-            (self.p.tp2_roe_pct, self.p.tp2_close_pct / Decimal(100)),
-            (self.p.tp3_roe_pct, self.p.tp3_close_pct / Decimal(100)),
+            (self.p.tp1_pct, self.p.tp1_close_pct / Decimal(100)),
+            (self.p.tp2_pct, self.p.tp2_close_pct / Decimal(100)),
+            (self.p.tp3_pct, self.p.tp3_close_pct / Decimal(100)),
         ]
 
     def _initial_stop(self, price: Decimal, side: PositionSide) -> Decimal:
@@ -327,14 +330,13 @@ class TrendScannerStrategy(Strategy):
     def position_levels(
         self, symbol: str, side: object, entry_price: object, leverage: int
     ) -> dict | None:
-        """Chart levels: TP price for each ROE level + the current/active stop."""
+        """Chart levels: TP price for each price-move level + the active stop."""
         if not isinstance(side, PositionSide):
             return None
         entry = Decimal(str(entry_price))
-        lev = max(int(leverage), 1)
         tps: list[Decimal] = []
-        for roe, _close in self._tp_levels():
-            move = (roe / Decimal(lev)) / Decimal(100)
+        for move_pct, _close in self._tp_levels():
+            move = move_pct / Decimal(100)
             if side is PositionSide.LONG:
                 tps.append(entry * (Decimal(1) + move))
             else:
@@ -494,17 +496,18 @@ class TrendScannerStrategy(Strategy):
                 )
                 return intents
 
-        # 2) Take-profit ladder (return on margin).
-        roe = (
-            pos.unrealized_pnl(price) / pos.margin * Decimal(100)
-            if pos.margin
-            else Decimal(0)
-        )
+        # 2) Take-profit ladder (favourable price move from entry).
+        entry = pos.entry_price
+        move_pct = (
+            (price - entry) / entry * Decimal(100)
+            if side is PositionSide.LONG
+            else (entry - price) / entry * Decimal(100)
+        ) if entry else Decimal(0)
         hits = self._tps_hit.get(k, 0)
         levels = self._tp_levels()
         if hits < len(levels):
-            roe_target, close_frac = levels[hits]
-            if roe >= roe_target:
+            target_pct, close_frac = levels[hits]
+            if move_pct >= target_pct:
                 self._tps_hit[k] = hits + 1
                 self._advance_stop(k, side, pos.entry_price, best)
                 is_last = (hits + 1) >= len(levels) or close_frac >= Decimal(1)
@@ -515,7 +518,7 @@ class TrendScannerStrategy(Strategy):
                         action=IntentAction.CLOSE if is_last else IntentAction.REDUCE,
                         position_side=side,
                         weight=close_frac,
-                        reason=f"take profit {hits + 1} ({roe:.2f}% ROE)",
+                        reason=f"take profit {hits + 1} (+{move_pct:.2f}% price)",
                         tag=f"tp_{hits + 1}",
                     )
                 )
