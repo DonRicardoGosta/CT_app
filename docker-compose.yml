@@ -90,5 +90,23 @@ services:
       backend-api:
         condition: service_started
 
+  db-tunnel:
+    image: ngrok/ngrok:latest
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+    command: >-
+      sh -c "if [ -z \"$$NGROK_AUTHTOKEN\" ]; then
+               echo 'NGROK_AUTHTOKEN is empty; DB tunnel disabled.' &&
+               tail -f /dev/null;
+             else
+               ngrok config add-authtoken $$NGROK_AUTHTOKEN &&
+               ngrok tcp postgres:5432 --log stdout;
+             fi"
+    ports:
+      - "4040:4040"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:
