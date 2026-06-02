@@ -422,22 +422,13 @@ class Engine:
                         instrument,
                     )
                     if plan is not None:
-                        await self.broker.place_exchange_protections(
+                        result = await self.broker.place_exchange_protections(
                             symbol=order.symbol,
                             position_side=order.position_side,
                             plan=plan,
                             instrument=instrument,
                         )
-                        await self._emit_log(
-                            "broker",
-                            "info",
-                            f"exchange TP/SL placed for {order.symbol}",
-                            context={
-                                "symbol": order.symbol,
-                                "stop": str(plan.stop_price),
-                                "tp_legs": len(plan.take_profits),
-                            },
-                        )
+                        await self._emit_protection_log(order.symbol, plan, result)
 
     def _open_symbols(self, account: AccountState) -> set[str]:
         return {
@@ -732,6 +723,54 @@ class Engine:
                 volume=bar.volume,
                 closed=True,
             )
+        )
+
+    async def _emit_protection_log(
+        self, symbol: str, plan, result: dict | None
+    ) -> None:
+        """Surface the outcome of exchange TP/SL placement to the UI Logs panel."""
+        expected_tp = len(plan.take_profits)
+        if result is None:
+            await self._emit_log(
+                "broker",
+                "info",
+                f"exchange TP/SL placed for {symbol}",
+                context={"symbol": symbol, "stop": str(plan.stop_price)},
+            )
+            return
+        if result.get("error"):
+            await self._emit_log(
+                "broker",
+                "error",
+                f"exchange TP/SL FAILED for {symbol}: {result['error']}",
+                context={"symbol": symbol, **result},
+            )
+            return
+        sl_placed = result.get("sl_placed")
+        tp_placed = int(result.get("tp_placed", 0))
+        verified = result.get("verified_count")
+        severity = "info"
+        if not sl_placed or tp_placed < int(result.get("tp_expected", expected_tp)):
+            severity = "warn"
+        msg = (
+            f"exchange TP/SL for {symbol}: "
+            f"SL {'ok' if sl_placed else 'MISSING'}, "
+            f"TP {tp_placed}/{result.get('tp_expected', expected_tp)} placed"
+        )
+        if isinstance(verified, int) and verified >= 0:
+            msg += f", {verified} resting on exchange"
+        await self._emit_log(
+            "broker",
+            severity,
+            msg,
+            context={
+                "symbol": symbol,
+                "stop": str(plan.stop_price),
+                "sl_placed": sl_placed,
+                "tp_placed": tp_placed,
+                "tp_expected": result.get("tp_expected", expected_tp),
+                "verified_count": verified,
+            },
         )
 
     async def _emit_watchlist(self) -> None:

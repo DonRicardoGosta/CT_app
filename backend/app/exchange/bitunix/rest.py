@@ -308,6 +308,32 @@ class BitunixRest:
             "POST", "/api/v1/futures/tpsl/place_order", body=body, signed=True
         )
 
+    async def get_pending_orders(
+        self, symbol: str | None = None, order_id: str | None = None
+    ) -> Any:
+        """Return open (NEW / PART_FILLED) trade orders."""
+        params: dict[str, Any] = {}
+        if symbol:
+            params["symbol"] = symbol
+        if order_id:
+            params["orderId"] = order_id
+        return await self._request(
+            "GET", "/api/v1/futures/trade/get_pending_orders", params=params or None, signed=True
+        )
+
+    async def get_pending_tpsl_orders(
+        self, symbol: str | None = None, position_id: str | None = None
+    ) -> Any:
+        """Return resting TP/SL orders for the account (optionally per position)."""
+        params: dict[str, Any] = {}
+        if symbol:
+            params["symbol"] = symbol
+        if position_id:
+            params["positionId"] = position_id
+        return await self._request(
+            "GET", "/api/v1/futures/tpsl/get_pending_orders", params=params or None, signed=True
+        )
+
     async def modify_position_tpsl(
         self,
         *,

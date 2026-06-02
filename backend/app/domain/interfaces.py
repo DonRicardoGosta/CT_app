@@ -75,6 +75,6 @@ class Broker(abc.ABC):
         position_side: PositionSide,
         plan: ProtectionPlan,
         instrument: Instrument,
-    ) -> None:
+    ) -> dict | None:
         """After an entry fill, register TP/SL on the exchange (live broker only)."""
         return None

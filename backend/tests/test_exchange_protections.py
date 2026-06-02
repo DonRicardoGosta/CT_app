@@ -6,7 +6,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.domain.brokers.live import LiveBroker
-from app.domain.types import Instrument, PositionSide, ProtectionPlan, TakeProfitLeg
+from app.domain.types import (
+    Instrument,
+    OrderRequest,
+    OrderStatus,
+    PositionSide,
+    ProtectionPlan,
+    TakeProfitLeg,
+)
 from app.exchange.bitunix.rest import BitunixRest
 from app.strategies.registry import create_strategy
 
@@ -81,12 +88,13 @@ async def test_live_broker_places_sl_and_tp_orders(btc_instrument: Instrument):
         ]
     )
     rest.place_tpsl_order = AsyncMock(side_effect=[{"orderId": "sl-1"}, {"orderId": "tp-1"}])
+    rest.get_pending_tpsl_orders = AsyncMock(return_value=[{"id": "sl-1"}, {"id": "tp-1"}])
     broker = LiveBroker(rest)
     plan = ProtectionPlan(
         stop_price=Decimal("98"),
         take_profits=(TakeProfitLeg(price=Decimal("101"), qty=Decimal("0.3")),),
     )
-    await broker.place_exchange_protections(
+    result = await broker.place_exchange_protections(
         symbol="BTCUSDT",
         position_side=PositionSide.LONG,
         plan=plan,
@@ -99,3 +107,101 @@ async def test_live_broker_places_sl_and_tp_orders(btc_instrument: Instrument):
     tp_call = rest.place_tpsl_order.await_args_list[1].kwargs
     assert tp_call["tp_price"] == "101"
     assert tp_call["tp_qty"] == "0.300"
+    assert result["sl_placed"] is True
+    assert result["tp_placed"] == 1
+    assert result["verified_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_live_broker_continues_tp_when_sl_fails(btc_instrument: Instrument):
+    rest = MagicMock(spec=BitunixRest)
+    rest.get_positions = AsyncMock(
+        return_value=[
+            {"symbol": "BTCUSDT", "qty": "1", "positionSide": "LONG", "positionId": "p1"}
+        ]
+    )
+    # SL raises, TP succeeds — TP must still be attempted.
+    rest.place_tpsl_order = AsyncMock(
+        side_effect=[RuntimeError("sl rejected"), {"orderId": "tp-1"}]
+    )
+    rest.get_pending_tpsl_orders = AsyncMock(return_value=[{"id": "tp-1"}])
+    broker = LiveBroker(rest)
+    plan = ProtectionPlan(
+        stop_price=Decimal("98"),
+        take_profits=(TakeProfitLeg(price=Decimal("101"), qty=Decimal("1")),),
+    )
+    result = await broker.place_exchange_protections(
+        symbol="BTCUSDT",
+        position_side=PositionSide.LONG,
+        plan=plan,
+        instrument=btc_instrument,
+    )
+    assert rest.place_tpsl_order.await_count == 2
+    assert result["sl_placed"] is False
+    assert result["tp_placed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_submit_open_rejected_when_no_position_appears(btc_instrument: Instrument):
+    from app.domain.types import OrderType, Side
+
+    rest = MagicMock(spec=BitunixRest)
+    # Position never appears -> open must be reported as REJECTED.
+    rest.get_positions = AsyncMock(return_value=[])
+    rest.set_leverage = AsyncMock(return_value={})
+    rest.place_order = AsyncMock(return_value={"orderId": "o1"})
+    broker = LiveBroker(rest)
+    broker._CONFIRM_ATTEMPTS = 2
+    broker._CONFIRM_DELAY_S = 0
+    req = OrderRequest(
+        symbol="BTCUSDT",
+        side=Side.BUY,
+        order_type=OrderType.MARKET,
+        qty=Decimal("1"),
+        position_side=PositionSide.LONG,
+        leverage=5,
+        tag="entry_1",
+    )
+    order = await broker.submit(req)
+    assert order.status is OrderStatus.REJECTED
+    assert "no position" in order.reason
+
+
+@pytest.mark.asyncio
+async def test_submit_open_confirmed_uses_exchange_qty(btc_instrument: Instrument):
+    from app.domain.types import OrderType, Side
+
+    rest = MagicMock(spec=BitunixRest)
+    # Baseline empty, then the position shows up after the order.
+    rest.get_positions = AsyncMock(
+        side_effect=[
+            [],
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "qty": "0.5",
+                    "positionSide": "LONG",
+                    "positionId": "p1",
+                    "avgOpenPrice": "100",
+                }
+            ],
+        ]
+    )
+    rest.set_leverage = AsyncMock(return_value={})
+    rest.place_order = AsyncMock(return_value={"orderId": "o1"})
+    broker = LiveBroker(rest)
+    broker._CONFIRM_ATTEMPTS = 3
+    broker._CONFIRM_DELAY_S = 0
+    req = OrderRequest(
+        symbol="BTCUSDT",
+        side=Side.BUY,
+        order_type=OrderType.MARKET,
+        qty=Decimal("0.5"),
+        position_side=PositionSide.LONG,
+        leverage=5,
+        tag="entry_1",
+    )
+    order = await broker.submit(req)
+    assert order.status is OrderStatus.FILLED
+    assert order.filled_qty == Decimal("0.5")
+    assert order.avg_fill_price == Decimal("100")
