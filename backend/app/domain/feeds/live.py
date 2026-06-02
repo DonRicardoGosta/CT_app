@@ -33,17 +33,40 @@ class LiveFeed(MarketDataFeed):
         instruments: dict[str, Instrument],
         interval: str = "1m",
     ) -> None:
-        self._symbols = symbols
+        self._symbols: list[str] = []
+        self._symbol_set: set[str] = set()
         self._instruments = instruments
         self._interval = interval
         self._ws = BitunixWS(PUBLIC_URL)
-        channel = _INTERVAL_CHANNEL.get(interval, "market_kline_1min")
         for sym in symbols:
-            self._ws.add_subscription(channel, sym)
+            self._add_initial_symbol(sym)
         self._in_progress: dict[str, Bar] = {}
+
+    @property
+    def _channel(self) -> str:
+        return _INTERVAL_CHANNEL.get(self._interval, "market_kline_1min")
+
+    def _add_initial_symbol(self, symbol: str) -> None:
+        if symbol in self._symbol_set:
+            return
+        self._symbol_set.add(symbol)
+        self._symbols.append(symbol)
+        self._ws.add_subscription(self._channel, symbol)
 
     async def instruments(self) -> dict[str, Instrument]:
         return self._instruments
+
+    async def ensure_symbols(self, symbols: list[str]) -> list[str]:
+        """Subscribe to newly opened scan-batch symbols only."""
+        added: list[str] = []
+        for symbol in symbols:
+            if symbol in self._symbol_set:
+                continue
+            self._symbol_set.add(symbol)
+            self._symbols.append(symbol)
+            if await self._ws.subscribe(self._channel, symbol):
+                added.append(symbol)
+        return added
 
     async def stream(self) -> AsyncIterator[MarketEvent]:
         await self._ws.start()

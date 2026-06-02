@@ -40,15 +40,36 @@ class BitunixWS:
         self.secret_key = secret_key
         self.ping_interval = ping_interval
         self._subscriptions: list[dict[str, str]] = []
+        self._subscription_keys: set[tuple[str, str | None]] = set()
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._task: asyncio.Task | None = None
         self._stopped = False
+        self._active_ws: Any | None = None
+        self._lock = asyncio.Lock()
 
     def add_subscription(self, channel: str, symbol: str | None = None) -> None:
+        key = (channel, symbol)
+        if key in self._subscription_keys:
+            return
         sub: dict[str, str] = {"ch": channel}
         if symbol:
             sub["symbol"] = symbol
         self._subscriptions.append(sub)
+        self._subscription_keys.add(key)
+
+    async def subscribe(self, channel: str, symbol: str | None = None) -> bool:
+        """Add a subscription and send it immediately when connected."""
+        key = (channel, symbol)
+        async with self._lock:
+            if key in self._subscription_keys:
+                return False
+            self.add_subscription(channel, symbol)
+            if self._active_ws is not None:
+                sub: dict[str, str] = {"ch": channel}
+                if symbol:
+                    sub["symbol"] = symbol
+                await self._active_ws.send(json.dumps({"op": "subscribe", "args": [sub]}))
+        return True
 
     async def start(self) -> None:
         self._stopped = False
@@ -75,6 +96,7 @@ class BitunixWS:
                 async with websockets.connect(
                     self.url, ping_interval=self.ping_interval
                 ) as ws:
+                    self._active_ws = ws
                     log.info("ws_connected", url=self.url)
                     backoff = 1.0
                     if self.api_key and self.secret_key:
@@ -82,9 +104,12 @@ class BitunixWS:
                     await self._subscribe(ws)
                     async for raw in ws:
                         await self._handle_raw(raw)
+                    self._active_ws = None
             except asyncio.CancelledError:
+                self._active_ws = None
                 raise
             except Exception as exc:  # noqa: BLE001 - reconnect on any failure
+                self._active_ws = None
                 log.warning("ws_disconnected", url=self.url, error=str(exc))
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)

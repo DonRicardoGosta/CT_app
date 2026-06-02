@@ -103,6 +103,7 @@ class Engine:
         self._selected: list[str] = []
         self._scanning: list[str] = []
         self._target = 0
+        self._active_limit = 0
         self._interval = "1m"
 
     def request_stop(self) -> None:
@@ -185,8 +186,10 @@ class Engine:
             self._selected = list(snap.get("selected", []))
             self._scanning = list(snap.get("scanning", self._universe))
             self._target = int(snap.get("target", len(self._selected)))
+            self._active_limit = int(snap.get("active_limit", len(self._scanning)))
 
         await self._emit_watchlist()
+        await self._ensure_feed_symbols(self._scanning)
         await self._emit_log(
             "engine",
             "info",
@@ -212,6 +215,7 @@ class Engine:
                     "interval": self._interval,
                 },
             )
+            await self._emit_scan_batch_logs(self._scanning, start_rank=1)
         for sym in self._selected:
             await self._emit_symbol_summary(sym, status="selected")
 
@@ -463,20 +467,64 @@ class Engine:
         if snap is None:
             return
         selected = list(snap.get("selected", []))
-        if selected == self._selected:
+        scanning = list(snap.get("scanning", []))
+        target = int(snap.get("target", len(selected)))
+        active_limit = int(snap.get("active_limit", len(scanning) + len(selected)))
+        previous_scanning = set(self._scanning)
+        if (
+            selected == self._selected
+            and scanning == self._scanning
+            and target == self._target
+            and active_limit == self._active_limit
+        ):
             return
         newly = [s for s in selected if s not in self._selected]
         self._selected = selected
-        self._scanning = list(snap.get("scanning", []))
-        self._target = int(snap.get("target", len(selected)))
+        self._scanning = scanning
+        self._target = target
+        self._active_limit = active_limit
+        newly_scanning = [s for s in self._scanning if s not in previous_scanning]
+        await self._ensure_feed_symbols(newly_scanning)
         await self._emit_watchlist()
+        if newly_scanning:
+            start_rank = max(self._active_limit - len(newly_scanning) + 1, 1)
+            await self._emit_scan_batch_logs(newly_scanning, start_rank=start_rank)
         for sym in newly:
             await self._emit_symbol_summary(sym, status="selected")
             await self._emit_log(
                 "engine",
                 "info",
-                f"coin selected for trading: {sym} ({len(selected)}/{self._target})",
+                f"coin selected for trading: {sym} ({len(selected)}/{self._target}); "
+                "trading it now while scanner keeps searching",
                 context={"selected": selected, "target": self._target},
+            )
+
+    async def _ensure_feed_symbols(self, symbols: list[str]) -> None:
+        if not symbols:
+            return
+        added = await self.feed.ensure_symbols(symbols)
+        if not added:
+            return
+        await self._emit_log(
+            "strategy",
+            "info",
+            f"subscribed next scan batch: {len(added)} coins",
+            context={"symbols": added, "active_limit": self._active_limit},
+        )
+
+    async def _emit_scan_batch_logs(self, symbols: list[str], *, start_rank: int) -> None:
+        for idx, symbol in enumerate(symbols, start=start_rank):
+            await self._emit_log(
+                "strategy",
+                "info",
+                f"scan {symbol}: queued in active volume batch, waiting for market data",
+                context={
+                    "symbol": symbol,
+                    "rank": idx,
+                    "check": "queued",
+                    "active_limit": self._active_limit,
+                    "target": self._target,
+                },
             )
 
     async def _emit_open_levels(self, symbol: str) -> None:

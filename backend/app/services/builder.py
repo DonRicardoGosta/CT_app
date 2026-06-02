@@ -26,9 +26,9 @@ from app.strategies import create_strategy
 
 log = get_logger(__name__)
 
-# Auto-selected universes can be large (the scanner subscribes to many coins in
-# live/dry mode). Backtests fetch klines per symbol, so cap the auto set to keep
-# runs fast when no explicit symbols are given.
+# Auto-selected universes can be large. Backtests fetch klines per symbol, so cap
+# the auto set to keep runs fast when no explicit symbols are given. Live/dry
+# mode subscribes only the active scan batch and expands dynamically.
 BACKTEST_MAX_AUTO_SYMBOLS = 8
 MAX_VOLUME_RANK = 500
 
@@ -61,6 +61,19 @@ def _resolve_symbols(
         return [s for s in config.symbols if s in instruments] or config.symbols
     desired = strategy.desired_symbols(instruments)
     return desired or list(instruments)[:5]
+
+
+def _initial_live_symbols(config: RunConfig, strategy, symbols: list[str]) -> list[str]:
+    """Subscribe only the active scan batch at startup.
+
+    The strategy may keep a top-500 ranked universe internally, but the live feed
+    should not open 500 WebSocket subscriptions at once. It starts with
+    ``scan_universe`` (30 by default) and the engine adds later batches on demand.
+    """
+    if config.symbols:
+        return symbols
+    batch = int(getattr(strategy.params, "scan_universe", len(symbols)) or len(symbols))
+    return symbols[: max(batch, 1)]
 
 
 def _reorder_instruments(
@@ -123,15 +136,22 @@ async def build_engine(
             )
 
     symbols = _resolve_symbols(config, strategy, instruments)
+    feed_symbols = list(symbols)
     # Backtests load klines per symbol; cap the auto-selected universe.
     if mode is Mode.BACKTEST and not config.symbols:
-        symbols = symbols[:BACKTEST_MAX_AUTO_SYMBOLS]
+        feed_symbols = symbols[:BACKTEST_MAX_AUTO_SYMBOLS]
+    elif mode is not Mode.BACKTEST:
+        feed_symbols = _initial_live_symbols(config, strategy, symbols)
     await _emit_builder_log(
         sink,
         config,
         "info",
-        f"resolved {len(symbols)} symbols",
-        context={"symbols": symbols, "interval": config.interval},
+        f"resolved {len(feed_symbols)} active symbols",
+        context={
+            "symbols": feed_symbols,
+            "ranked_universe": len(symbols),
+            "interval": config.interval,
+        },
     )
 
     clock: Clock
@@ -140,7 +160,7 @@ async def build_engine(
 
     if mode is Mode.BACKTEST:
         per_symbol = {}
-        for sym in symbols:
+        for sym in feed_symbols:
             try:
                 per_symbol[sym] = await rest.get_klines(
                     sym, config.interval, config.backtest_limit
@@ -161,7 +181,7 @@ async def build_engine(
                 config,
                 "error",
                 "backtest loaded zero bars",
-                context={"symbols": symbols, "interval": config.interval},
+                context={"symbols": feed_symbols, "interval": config.interval},
             )
         start = bars[0].open_time if bars else config.backtest_start
         sim_clock = SimulatedClock(start) if start else SimulatedClock(_epoch())
@@ -173,7 +193,7 @@ async def build_engine(
         await rest.close()
     else:
         clock = RealClock()
-        feed = LiveFeed(symbols, instruments, config.interval)
+        feed = LiveFeed(feed_symbols, instruments, config.interval)
         if mode is Mode.LIVE:
             broker = LiveBroker(rest)
         else:  # DRY_RUN: simulated fills on live prices

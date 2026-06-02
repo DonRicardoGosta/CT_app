@@ -37,6 +37,14 @@ class MarketDataFeed(abc.ABC):
     async def instruments(self) -> dict[str, Instrument]:
         """Return the tradable instruments known to this feed."""
 
+    async def ensure_symbols(self, symbols: list[str]) -> list[str]:
+        """Ensure live market data is subscribed for ``symbols``.
+
+        Static feeds (backtest) can ignore this. Live feeds return the symbols
+        newly subscribed, which lets the engine log batch expansion.
+        """
+        return []
+
 
 class Broker(abc.ABC):
     """Executes orders and exposes account state.
