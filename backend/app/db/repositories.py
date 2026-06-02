@@ -305,11 +305,14 @@ async def list_equity(
 
 async def list_errors(
     session: AsyncSession,
+    run_id: str | None = None,
     source: str | None = None,
     severity: str | None = None,
     limit: int = 500,
 ) -> list[ErrorLog]:
     stmt = select(ErrorLog).order_by(ErrorLog.ts.desc()).limit(limit)
+    if run_id:
+        stmt = stmt.where(ErrorLog.run_id == run_id)
     if source:
         stmt = stmt.where(ErrorLog.source == source)
     if severity:

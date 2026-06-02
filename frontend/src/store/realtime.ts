@@ -27,6 +27,7 @@ interface RealtimeState {
   positions: Record<string, PositionRow>;
   equity: RealtimeEvent | null;
   equityCurve: { ts: number; equity: number }[];
+  runEquity: Record<string, { ts: number; equity: number }[]>;
   fills: RealtimeEvent[];
   orders: RealtimeEvent[];
   signals: RealtimeEvent[];
@@ -80,6 +81,7 @@ export const useRealtime = create<RealtimeState>((set) => ({
   positions: {},
   equity: null,
   equityCurve: [],
+  runEquity: {},
   fills: [],
   orders: [],
   signals: [],
@@ -95,6 +97,7 @@ export const useRealtime = create<RealtimeState>((set) => ({
       positions: {},
       equity: null,
       equityCurve: [],
+      runEquity: {},
       fills: [],
       orders: [],
       signals: [],
@@ -119,7 +122,13 @@ export const useRealtime = create<RealtimeState>((set) => ({
           const eq = parseFloat(String(e.equity));
           const ts = new Date(String(e.ts)).getTime();
           const curve = [...state.equityCurve, { ts, equity: eq }].slice(-MAX_CURVE);
-          return { equity: e, equityCurve: curve };
+          const rid = e.run_id ? String(e.run_id) : "";
+          const runEquity = { ...state.runEquity };
+          if (rid) {
+            const prev = runEquity[rid] ?? [];
+            runEquity[rid] = [...prev, { ts, equity: eq }].slice(-MAX_CURVE);
+          }
+          return { equity: e, equityCurve: curve, runEquity };
         }
         case "fill":
           return { fills: prepend(state.fills, e) };

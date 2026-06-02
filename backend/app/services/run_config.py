@@ -11,8 +11,9 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from app.core.datetime_util import ensure_utc
 from app.domain.types import Mode
 from app.risk.config import RiskParams
 
@@ -41,3 +42,8 @@ class RunConfig(BaseModel):
     backtest_limit: int = 1000
 
     model_config = {"use_enum_values": True}
+
+    @field_validator("backtest_start", "backtest_end", mode="after")
+    @classmethod
+    def _utc_backtest_dates(cls, v: datetime | None) -> datetime | None:
+        return ensure_utc(v)

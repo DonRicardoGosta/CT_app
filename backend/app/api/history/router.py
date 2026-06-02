@@ -48,12 +48,13 @@ async def get_equity(
 
 @router.get("/errors")
 async def get_errors(
+    run_id: str | None = None,
     source: str | None = None,
     severity: str | None = None,
     limit: int = Query(500, le=5000),
     session: AsyncSession = Depends(get_session),
 ):
-    return rows_to_list(await repo.list_errors(session, source, severity, limit))
+    return rows_to_list(await repo.list_errors(session, run_id, source, severity, limit))
 
 
 @router.get("/signals")
