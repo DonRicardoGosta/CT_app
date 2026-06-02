@@ -131,6 +131,7 @@ class MarketEvent:
     symbol: str
     bar: Bar | None = None
     tick: Tick | None = None
+    warmup: bool = False
 
     @property
     def price(self) -> Decimal:

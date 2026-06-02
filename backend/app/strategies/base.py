@@ -101,6 +101,15 @@ class Strategy(abc.ABC):
         """
         return None
 
+    def warmup_bars(self) -> int:
+        """How many historical bars per symbol to preload before going live.
+
+        Live/dry runs otherwise build history one candle at a time, so a 200-EMA
+        strategy would sit idle for hours. Return the number of closed bars the
+        strategy needs to start evaluating; 0 disables preloading.
+        """
+        return 0
+
     @abc.abstractmethod
     def on_event(self, context: StrategyContext) -> list[TradeIntent]:
         """Return the intents to act on for this market event (pure, no I/O)."""

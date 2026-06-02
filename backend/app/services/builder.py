@@ -193,15 +193,31 @@ async def build_engine(
         await rest.close()
     else:
         clock = RealClock()
-        feed = LiveFeed(feed_symbols, instruments, config.interval)
+        warmup = int(getattr(strategy, "warmup_bars", lambda: 0)() or 0)
+        # The feed preloads history via REST, so it keeps the client open for the
+        # life of the run (used at startup and when new scan batches subscribe).
+        feed = LiveFeed(
+            feed_symbols,
+            instruments,
+            config.interval,
+            rest=rest,
+            warmup_bars=warmup,
+        )
+        if warmup:
+            await _emit_builder_log(
+                sink,
+                config,
+                "info",
+                f"preloading {warmup} historical {config.interval} bars per coin "
+                "so the scanner can evaluate immediately",
+                context={"warmup_bars": warmup, "symbols": feed_symbols},
+            )
         if mode is Mode.LIVE:
             broker = LiveBroker(rest)
         else:  # DRY_RUN: simulated fills on live prices
             broker = SimBroker(
                 clock, instruments, config.initial_capital, fee_rate=config.risk.fee_rate
             )
-            # rest stays open only if needed; dry-run uses public feed, close it.
-            await rest.close()
 
     return Engine(
         mode=mode,

@@ -4,17 +4,28 @@ Strategies act on *closed* bars, so this feed emits a BAR event when a candle
 rolls over (a kline push arrives with a newer open time than the one in progress)
 and a TICK event for every push in between (used for live mark-to-market). This
 keeps the live decision stream identical in shape to the backtest stream.
+
+Before live data flows, the feed preloads recent historical bars per symbol (when
+a REST client is supplied) and emits them as ``warmup`` BAR events. This lets a
+strategy that needs a long history (e.g. a 200-EMA trend filter) start evaluating
+immediately instead of idling for hours while candles accumulate one by one.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
+from app.core.logging import get_logger
 from app.domain.interfaces import MarketDataFeed
 from app.domain.types import Bar, Instrument, MarketEvent, MarketEventType, Tick
 from app.exchange.bitunix.models import parse_kline
+from app.exchange.bitunix.rest import BitunixRest
 from app.exchange.bitunix.ws import PUBLIC_URL, BitunixWS
+
+log = get_logger(__name__)
 
 _INTERVAL_CHANNEL = {
     "1m": "market_kline_1min",
@@ -32,15 +43,22 @@ class LiveFeed(MarketDataFeed):
         symbols: list[str],
         instruments: dict[str, Instrument],
         interval: str = "1m",
+        *,
+        rest: BitunixRest | None = None,
+        warmup_bars: int = 0,
     ) -> None:
         self._symbols: list[str] = []
         self._symbol_set: set[str] = set()
         self._instruments = instruments
         self._interval = interval
+        self._rest = rest
+        self._warmup_bars = warmup_bars
         self._ws = BitunixWS(PUBLIC_URL)
         for sym in symbols:
             self._add_initial_symbol(sym)
         self._in_progress: dict[str, Bar] = {}
+        self._queue: asyncio.Queue[MarketEvent] = asyncio.Queue()
+        self._pump_task: asyncio.Task | None = None
 
     @property
     def _channel(self) -> str:
@@ -57,7 +75,7 @@ class LiveFeed(MarketDataFeed):
         return self._instruments
 
     async def ensure_symbols(self, symbols: list[str]) -> list[str]:
-        """Subscribe to newly opened scan-batch symbols only."""
+        """Subscribe to newly opened scan-batch symbols and preload their history."""
         added: list[str] = []
         for symbol in symbols:
             if symbol in self._symbol_set:
@@ -66,14 +84,57 @@ class LiveFeed(MarketDataFeed):
             self._symbols.append(symbol)
             if await self._ws.subscribe(self._channel, symbol):
                 added.append(symbol)
+        if added:
+            await self._enqueue_warmup(added)
         return added
 
     async def stream(self) -> AsyncIterator[MarketEvent]:
+        # Preload history for the initial batch before any live data flows.
+        await self._enqueue_warmup(list(self._symbols))
         await self._ws.start()
+        self._pump_task = asyncio.create_task(self._pump_ws())
+        try:
+            while True:
+                yield await self._queue.get()
+        finally:
+            if self._pump_task is not None:
+                self._pump_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._pump_task
+
+    async def _pump_ws(self) -> None:
         async for msg in self._ws.messages():
             event = self._to_event(msg)
             if event is not None:
-                yield event
+                await self._queue.put(event)
+
+    async def _enqueue_warmup(self, symbols: list[str]) -> None:
+        """Fetch recent closed bars per symbol and queue them as warmup events."""
+        if self._rest is None or self._warmup_bars <= 0:
+            return
+        for symbol in symbols:
+            try:
+                bars = await self._rest.get_recent_klines(
+                    symbol, self._interval, self._warmup_bars
+                )
+            except Exception as exc:  # noqa: BLE001 - skip symbols we can't warm
+                log.warning("warmup_klines_failed", symbol=symbol, error=str(exc))
+                continue
+            if not bars:
+                continue
+            # All but the last become history; the last is the in-progress candle
+            # so the first live rollover emits it as the first real closed bar.
+            for bar in bars[:-1]:
+                await self._queue.put(
+                    MarketEvent(
+                        type=MarketEventType.BAR,
+                        ts=bar.open_time,
+                        symbol=symbol,
+                        bar=bar,
+                        warmup=True,
+                    )
+                )
+            self._in_progress[symbol] = bars[-1]
 
     def _to_event(self, msg: dict) -> MarketEvent | None:
         symbol = msg.get("symbol")

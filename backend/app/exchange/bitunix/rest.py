@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -23,6 +23,13 @@ from app.exchange.bitunix.signing import rest_headers
 log = get_logger(__name__)
 
 BASE_URL = "https://fapi.bitunix.com"
+
+_INTERVAL_SECONDS = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "1h": 3600,
+}
 
 
 class RateLimiter:
@@ -158,6 +165,17 @@ class BitunixRest:
         bars = [parse_kline(symbol, interval, item) for item in (data or [])]
         bars.sort(key=lambda b: b.open_time)
         return bars
+
+    async def get_recent_klines(
+        self, symbol: str, interval: str = "1m", count: int = 200
+    ) -> list[Bar]:
+        """Fetch the most recent ``count`` closed bars (paginating past 200)."""
+        if count <= 200:
+            return await self.get_klines(symbol, interval, count)
+        seconds = _INTERVAL_SECONDS.get(interval, 60)
+        start = datetime.now(UTC) - timedelta(seconds=seconds * (count + 5))
+        bars = await self._get_klines_range(symbol, interval, start, None)
+        return bars[-count:]
 
     async def _get_klines_range(
         self,

@@ -105,6 +105,8 @@ class Engine:
         self._target = 0
         self._active_limit = 0
         self._interval = "1m"
+        self._warmup_seeded = 0
+        self._warmup_done = False
 
     def request_stop(self) -> None:
         """Ask the loop to finish after the current event (live use)."""
@@ -226,6 +228,26 @@ class Engine:
         summary: EngineSummary,
     ) -> None:
         summary.events += 1
+
+        # 0) warmup bars only seed rolling history; no trading, no event spam.
+        if event.warmup:
+            if event.bar is not None:
+                self.market.update_bar(event.bar)
+                self._interval = event.bar.interval
+                await self.broker.set_mark(event.symbol, event.price)
+            self._warmup_seeded += 1
+            return
+
+        if not self._warmup_done:
+            self._warmup_done = True
+            if self._warmup_seeded:
+                await self._emit_log(
+                    "strategy",
+                    "info",
+                    f"history preloaded ({self._warmup_seeded} bars); "
+                    "evaluating coins on live data now",
+                    context={"warmup_bars": self._warmup_seeded},
+                )
 
         # 1) update market state + broker mark
         if event.type is MarketEventType.BAR and event.bar is not None:

@@ -167,6 +167,11 @@ class TrendScannerStrategy(Strategy):
     def _required_history(self) -> int:
         return max(self.p.ema_slow, self.p.trend_ema, self.p.rsi_period) + 1
 
+    def warmup_bars(self) -> int:
+        # A small buffer over the strict requirement so indicators are stable on
+        # the first live bar (the last preloaded bar becomes the first closed bar).
+        return self._required_history() + 10
+
     def _maybe_expand_active_batch(self, context: StrategyContext) -> None:
         """Move from top 30 -> top 60 -> ... -> top 500, one batch at a time.
 
