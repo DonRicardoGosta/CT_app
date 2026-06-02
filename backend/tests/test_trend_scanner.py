@@ -16,7 +16,18 @@ from app.domain.brokers.sim import SimBroker
 from app.domain.clock import SimulatedClock
 from app.domain.engine import Engine
 from app.domain.feeds.replay import ReplayFeed
-from app.domain.types import Bar, Instrument, IntentAction, Mode, PositionSide
+from app.domain.types import (
+    AccountState,
+    Bar,
+    Instrument,
+    IntentAction,
+    MarketEvent,
+    MarketEventType,
+    Mode,
+    PositionSide,
+    Tick,
+)
+from app.strategies.base import StrategyContext
 from app.events.bus import InMemorySink
 from app.events.schemas import ErrorEvent, TradeLevelEvent, WatchlistEvent
 from app.risk.config import RiskParams
@@ -208,6 +219,33 @@ def test_position_levels_uses_leverage():
     assert lv["stops"], "an initial stop level must be present"
 
 
+def test_scan_diagnostics_on_tick_before_first_bar():
+    from app.domain.market import MarketState
+
+    strat = create_strategy("trend_scanner", {"scan_universe": 5, "max_scan_rank": 10})
+    instruments = _instruments()
+    strat.desired_symbols(instruments)
+    market = MarketState()
+    market.update_price("BTCUSDT", Decimal("100"))
+    ctx = StrategyContext(
+        event=MarketEvent(
+            type=MarketEventType.TICK,
+            ts=_EPOCH,
+            symbol="BTCUSDT",
+            tick=Tick(symbol="BTCUSDT", price=Decimal("100"), ts=_EPOCH),
+        ),
+        now=_EPOCH,
+        account=AccountState(ts=_EPOCH, balance=Decimal("1000")),
+        instruments=instruments,
+        market=market,
+        interval="5m",
+    )
+    strat.scan_diagnostics(ctx)
+    logs = strat.drain_scan_logs()
+    assert logs
+    assert "waiting for first closed 5m candle" in logs[0]["message"]
+
+
 def test_desired_symbols_preserves_volume_rank_order_and_caps_to_max_rank():
     instruments = _multi_instruments(12)
     # Simulate builder volume ordering by inserting symbols in reverse rank order.
@@ -256,7 +294,8 @@ def test_selection_expands_one_volume_batch_at_a_time():
     # First 3 ready -> opens next batch, but only one expansion happens.
     snap = strat.selection_snapshot(Ctx(ready=3))
     assert snap["active_limit"] == 6
-    assert len(snap["scanning"]) == 3
+    assert len(snap["scanning"]) == 6
     # Now first 6 ready -> opens final batch.
     snap = strat.selection_snapshot(Ctx(ready=6))
     assert snap["active_limit"] == 7
+    assert len(snap["scanning"]) == 7

@@ -31,6 +31,7 @@ class StrategyContext:
     account: AccountState
     instruments: dict[str, Instrument]
     market: MarketState
+    interval: str = "1m"
 
 
 class Strategy(abc.ABC):
@@ -91,6 +92,14 @@ class Strategy(abc.ABC):
         check). The engine emits them with source ``strategy`` after each bar.
         """
         return []
+
+    def scan_diagnostics(self, context: StrategyContext) -> None:
+        """Optional hook on every market event (ticks and bars).
+
+        Use for live/dry feedback before the first closed candle exists. Heavy
+        work should stay in :meth:`on_event` on closed bars only.
+        """
+        return None
 
     @abc.abstractmethod
     def on_event(self, context: StrategyContext) -> list[TradeIntent]:

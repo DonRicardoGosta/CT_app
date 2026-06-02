@@ -167,6 +167,7 @@ class Engine:
             account=account,
             instruments=instruments,
             market=self.market,
+            interval=self._interval,
         )
         await self.strategy.on_start(ctx)
         if event.bar is not None:
@@ -189,14 +190,28 @@ class Engine:
         await self._emit_log(
             "engine",
             "info",
-            f"scanning {len(self._scanning) + len(self._selected)} coins "
-            f"for setups (target {self._target})",
+            f"scanning {len(self._scanning)} coins "
+            f"(selected {len(self._selected)}/{self._target})",
             context={
                 "selected": self._selected,
+                "scanning": self._scanning[:20],
+                "scanning_count": len(self._scanning),
                 "target": self._target,
                 "interval": self._interval,
             },
         )
+        if snap is not None and self._scanning:
+            await self._emit_log(
+                "strategy",
+                "info",
+                f"watching top {int(snap.get('active_limit', len(self._scanning)))} "
+                f"coins by 24h volume ({self._interval} bars)",
+                context={
+                    "scanning": self._scanning[:30],
+                    "target": self._target,
+                    "interval": self._interval,
+                },
+            )
         for sym in self._selected:
             await self._emit_symbol_summary(sym, status="selected")
 
@@ -216,6 +231,7 @@ class Engine:
         await self.broker.set_mark(event.symbol, event.price)
         await self._emit_market(event)
         if event.type is MarketEventType.BAR and event.bar is not None:
+            self._interval = event.bar.interval
             await self._emit_candle(event.bar)
             if event.bar.symbol in self._selected:
                 await self._emit_symbol_summary(event.bar.symbol)
@@ -228,7 +244,10 @@ class Engine:
             account=account,
             instruments=instruments,
             market=self.market,
+            interval=self._interval,
         )
+        self.strategy.scan_diagnostics(ctx)
+        await self._flush_strategy_logs()
         intents = self.strategy.on_event(ctx)
         await self._flush_strategy_logs()
 

@@ -182,7 +182,17 @@ export default function Logs() {
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-lg font-semibold">Logs & Errors</h2>
-            <p className="text-xs text-muted">Grafana-like live tail from WebSocket + persisted history</p>
+            <p className="text-xs text-muted">
+              Grafana-like live tail. Coin scan details use source{" "}
+              <button
+                type="button"
+                className="text-accent hover:underline"
+                onClick={() => setSource("strategy")}
+              >
+                strategy
+              </button>{" "}
+              (appear on live ticks and each closed candle).
+            </p>
           </div>
           <div className="flex items-center gap-2">
             <Badge tone={wsStatus === "open" ? "up" : wsStatus === "connecting" ? "warn" : "down"}>

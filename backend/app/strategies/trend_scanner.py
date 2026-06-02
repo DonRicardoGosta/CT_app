@@ -155,11 +155,8 @@ class TrendScannerStrategy(Strategy):
 
     def selection_snapshot(self, context: StrategyContext) -> dict | None:
         self._maybe_expand_active_batch(context)
-        # Only count coins we actually receive data for as "scanning".
-        seen = set(context.market.symbols())
         active = (self._universe or list(context.instruments))[: self._active_limit]
-        universe = [s for s in active if s in seen]
-        scanning = [s for s in universe if s not in self._selected]
+        scanning = [s for s in active if s not in self._selected]
         return {
             "selected": list(self._selected),
             "scanning": scanning,
@@ -232,9 +229,38 @@ class TrendScannerStrategy(Strategy):
             self._selected.append(symbol)
 
     def _active_symbols(self, context: StrategyContext) -> list[str]:
-        seen = set(context.market.symbols())
         active = (self._universe or list(context.instruments))[: self._active_limit]
-        return [s for s in active if s in seen]
+        return list(active)
+
+    def scan_diagnostics(self, context: StrategyContext) -> None:
+        """Log scan status on live ticks before the first closed bar exists."""
+        if context.event.bar is not None:
+            return
+        symbol = context.event.symbol
+        if not symbol:
+            return
+        if self._universe and symbol not in self._universe[: self._active_limit]:
+            return
+        interval = context.interval
+        closes = context.market.closes(symbol)
+        need = self._required_history()
+        have = len(closes)
+        if have == 0:
+            self._queue_scan_log(
+                symbol,
+                f"live price tick, waiting for first closed {interval} candle",
+                check="await_closed_bar",
+                interval=interval,
+            )
+            return
+        if have < need:
+            self._queue_scan_log(
+                symbol,
+                f"warming up ({have}/{need} bars)",
+                check="warming_up",
+                bars=have,
+                required=need,
+            )
 
     def _evaluate_scan(
         self, symbol: str, context: StrategyContext
