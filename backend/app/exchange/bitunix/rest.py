@@ -292,6 +292,15 @@ class BitunixRest:
             body["clientId"] = request.client_id
         # Hedge mode requires the position direction.
         body["positionSide"] = "LONG" if request.position_side is PositionSide.LONG else "SHORT"
+        if not request.reduce_only and request.protection is not None:
+            plan = request.protection
+            body["slPrice"] = str(plan.stop_price)
+            body["slStopType"] = "LAST_PRICE"
+            body["slOrderType"] = "MARKET"
+            if plan.take_profits:
+                body["tpPrice"] = str(plan.take_profits[0].price)
+                body["tpStopType"] = "LAST_PRICE"
+                body["tpOrderType"] = "MARKET"
         return await self._request(
             "POST", "/api/v1/futures/trade/place_order", body=body, signed=True
         )

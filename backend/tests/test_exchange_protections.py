@@ -10,8 +10,10 @@ from app.domain.types import (
     Instrument,
     OrderRequest,
     OrderStatus,
+    OrderType,
     PositionSide,
     ProtectionPlan,
+    Side,
     TakeProfitLeg,
 )
 from app.exchange.bitunix.rest import BitunixRest
@@ -72,6 +74,113 @@ def test_manage_position_skips_software_exits_when_exchange_protections():
     # Price far below stop — would close in sim, but must not emit intents.
     intents = strat._manage_position("BTCUSDT", PositionSide.LONG, pos, Decimal("50"))
     assert intents == []
+
+
+@pytest.mark.asyncio
+async def test_rest_place_order_includes_bundled_protection(btc_instrument: Instrument):
+    rest = BitunixRest(api_key="k", secret_key="s")
+    captured: list[dict] = []
+
+    async def fake_request(_method, _path, *, body=None, **_kw):
+        captured.append(body or {})
+        return {"orderId": "o1"}
+
+    rest._request = fake_request  # type: ignore[method-assign]
+    plan = ProtectionPlan(
+        stop_price=Decimal("98"),
+        take_profits=(TakeProfitLeg(price=Decimal("101"), qty=Decimal("0.3")),),
+    )
+    req = OrderRequest(
+        symbol="BTCUSDT",
+        side=Side.BUY,
+        order_type=OrderType.MARKET,
+        qty=Decimal("1"),
+        position_side=PositionSide.LONG,
+        leverage=5,
+        protection=plan,
+    )
+    await rest.place_order(req)
+    assert captured[0]["slPrice"] == "98"
+    assert captured[0]["slStopType"] == "LAST_PRICE"
+    assert captured[0]["tpPrice"] == "101"
+    assert captured[0]["tpOrderType"] == "MARKET"
+
+
+@pytest.mark.asyncio
+async def test_submit_open_bundled_protection_verified(btc_instrument: Instrument):
+    rest = MagicMock(spec=BitunixRest)
+    rest.get_positions = AsyncMock(
+        side_effect=[
+            [],
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "qty": "1",
+                    "positionSide": "LONG",
+                    "positionId": "p1",
+                    "avgOpenPrice": "100",
+                }
+            ],
+        ]
+    )
+    rest.set_leverage = AsyncMock(return_value={})
+    rest.place_order = AsyncMock(return_value={"orderId": "o1"})
+    rest.get_pending_tpsl_orders = AsyncMock(return_value=[{"id": "sl-1"}])
+    broker = LiveBroker(rest)
+    broker._CONFIRM_ATTEMPTS = 3
+    broker._CONFIRM_DELAY_S = 0
+    plan = ProtectionPlan(
+        stop_price=Decimal("98"),
+        take_profits=(TakeProfitLeg(price=Decimal("101"), qty=Decimal("1")),),
+    )
+    req = OrderRequest(
+        symbol="BTCUSDT",
+        side=Side.BUY,
+        order_type=OrderType.MARKET,
+        qty=Decimal("1"),
+        position_side=PositionSide.LONG,
+        leverage=5,
+        protection=plan,
+    )
+    order = await broker.submit(req)
+    assert order.status is OrderStatus.FILLED
+    assert order.bundled_sl is True
+    assert order.bundled_tp == 1
+    assert order.bundled_protection_ok is True
+    sent = rest.place_order.await_args.args[0]
+    assert sent.protection is plan
+
+
+@pytest.mark.asyncio
+async def test_place_exchange_protections_skip_sl_places_tp_only(btc_instrument: Instrument):
+    rest = MagicMock(spec=BitunixRest)
+    rest.get_positions = AsyncMock(
+        return_value=[
+            {"symbol": "BTCUSDT", "qty": "1", "positionSide": "LONG", "positionId": "p1"}
+        ]
+    )
+    rest.place_tpsl_order = AsyncMock(return_value={"orderId": "tp-2"})
+    rest.get_pending_tpsl_orders = AsyncMock(return_value=[{"id": "tp-2"}])
+    broker = LiveBroker(rest)
+    plan = ProtectionPlan(
+        stop_price=Decimal("98"),
+        take_profits=(
+            TakeProfitLeg(price=Decimal("101"), qty=Decimal("0.3")),
+            TakeProfitLeg(price=Decimal("102"), qty=Decimal("0.7")),
+        ),
+    )
+    result = await broker.place_exchange_protections(
+        symbol="BTCUSDT",
+        position_side=PositionSide.LONG,
+        plan=plan,
+        instrument=btc_instrument,
+        skip_sl=True,
+        take_profits=plan.take_profits[1:],
+    )
+    assert rest.place_tpsl_order.await_count == 1
+    assert rest.place_tpsl_order.await_args.kwargs.get("sl_price") is None
+    assert result["sl_placed"] is True
+    assert result["tp_placed"] == 1
 
 
 @pytest.mark.asyncio

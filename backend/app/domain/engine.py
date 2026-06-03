@@ -16,7 +16,7 @@ The engine never touches the database; everything is published as events.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -36,6 +36,7 @@ from app.domain.types import (
     Order,
     OrderStatus,
     PositionSide,
+    ProtectionPlan,
 )
 from app.events.bus import EventSink
 from app.events.schemas import (
@@ -339,7 +340,23 @@ class Engine:
                     if ctx is not None:
                         await self._refresh_selection(ctx)
                 continue
-            order = await self.broker.submit(result.request)
+            entry_plan: ProtectionPlan | None = None
+            submit_request = result.request
+            if (
+                self.mode is Mode.LIVE
+                and intent.action is IntentAction.OPEN
+                and instrument is not None
+            ):
+                entry_plan = self.strategy.protection_plan(
+                    intent.symbol,
+                    intent.position_side,
+                    price,
+                    result.request.qty,
+                    instrument,
+                )
+                if entry_plan is not None:
+                    submit_request = replace(result.request, protection=entry_plan)
+            order = await self.broker.submit(submit_request)
             await self._emit_order(order)
             await self._emit_log(
                 "order",
@@ -413,22 +430,15 @@ class Engine:
                     )
                     if ctx is not None:
                         await self._refresh_selection(ctx)
-                if self.mode is Mode.LIVE and instrument is not None:
-                    plan = self.strategy.protection_plan(
-                        order.symbol,
-                        order.position_side,
-                        entry,
-                        order.filled_qty or order.qty,
-                        instrument,
+                if self.mode is Mode.LIVE and instrument is not None and entry_plan is not None:
+                    prot_result = await self._place_entry_protections(
+                        order=order,
+                        plan=entry_plan,
+                        instrument=instrument,
+                        entry=entry,
                     )
-                    if plan is not None:
-                        result = await self.broker.place_exchange_protections(
-                            symbol=order.symbol,
-                            position_side=order.position_side,
-                            plan=plan,
-                            instrument=instrument,
-                        )
-                        await self._emit_protection_log(order.symbol, plan, result)
+                    if prot_result is not None:
+                        await self._emit_protection_log(order.symbol, entry_plan, prot_result)
 
     def _open_symbols(self, account: AccountState) -> set[str]:
         return {
@@ -752,6 +762,54 @@ class Engine:
                 closed=True,
             )
         )
+
+    async def _place_entry_protections(
+        self,
+        *,
+        order: Order,
+        plan: ProtectionPlan,
+        instrument: Instrument,
+        entry: Decimal,
+    ) -> dict | None:
+        """Place remainder TP/SL after a bundled entry, or fall back to full placement."""
+        _ = entry  # reserved for future fill-vs-plan qty adjustments
+        remainder = plan.take_profits[1:] if len(plan.take_profits) > 1 else ()
+
+        if order.bundled_protection_ok and not remainder:
+            return {
+                "position_id": None,
+                "sl_placed": order.bundled_sl,
+                "tp_placed": order.bundled_tp,
+                "tp_expected": len(plan.take_profits),
+                "verified_count": -1,
+                "error": None,
+                "bundled": True,
+            }
+
+        if not order.bundled_protection_ok:
+            return await self.broker.place_exchange_protections(
+                symbol=order.symbol,
+                position_side=order.position_side,
+                plan=plan,
+                instrument=instrument,
+            )
+
+        post = await self.broker.place_exchange_protections(
+            symbol=order.symbol,
+            position_side=order.position_side,
+            plan=plan,
+            instrument=instrument,
+            skip_sl=True,
+            take_profits=remainder,
+        )
+        if post is None:
+            return post
+        return {
+            **post,
+            "sl_placed": order.bundled_sl or post.get("sl_placed"),
+            "tp_placed": order.bundled_tp + int(post.get("tp_placed", 0)),
+            "tp_expected": len(plan.take_profits),
+        }
 
     async def _emit_protection_log(
         self, symbol: str, plan, result: dict | None

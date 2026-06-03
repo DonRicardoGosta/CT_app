@@ -29,6 +29,7 @@ from app.domain.types import (
     Position,
     PositionSide,
     ProtectionPlan,
+    TakeProfitLeg,
 )
 from app.exchange.bitunix.rest import BitunixRest
 from app.risk.sizer import _round_qty
@@ -127,20 +128,23 @@ class LiveBroker(Broker):
         position_side: PositionSide,
         plan: ProtectionPlan,
         instrument: Instrument,
+        skip_sl: bool = False,
+        take_profits: tuple[TakeProfitLeg, ...] | None = None,
     ) -> dict[str, Any]:
         """Register stop-loss and scaled take-profits on Bitunix after entry.
 
         Each leg is placed independently so one failure does not skip the rest.
         Returns a result describing what landed, so the caller can warn the user.
         """
+        tp_legs = take_profits if take_profits is not None else plan.take_profits
         position_id, pos_qty = await self._resolve_position(symbol, position_side)
         if not position_id:
             log.error("tpsl_no_position", symbol=symbol, side=position_side.value)
             return {
                 "position_id": None,
-                "sl_placed": False,
+                "sl_placed": skip_sl,
                 "tp_placed": 0,
-                "tp_expected": len(plan.take_profits),
+                "tp_expected": len(tp_legs),
                 "error": "no position to attach TP/SL to",
             }
 
@@ -148,27 +152,29 @@ class LiveBroker(Broker):
         if sl_qty <= 0:
             sl_qty = pos_qty
         placed: list[str] = []
-        sl_placed = False
+        sl_placed = skip_sl
 
-        try:
-            sl_resp = await self._rest.place_tpsl_order(
-                symbol=symbol,
-                position_id=position_id,
-                sl_price=str(plan.stop_price),
-                sl_qty=str(sl_qty),
-            )
-            sl_placed = True
-            if isinstance(sl_resp, dict) and sl_resp.get("orderId"):
-                placed.append(str(sl_resp["orderId"]))
-        except Exception as exc:  # noqa: BLE001 - keep going so TPs still get placed
-            log.error(
-                "exchange_sl_failed",
-                error=str(exc),
-                symbol=symbol,
-                side=position_side.value,
-            )
+        if not skip_sl:
+            try:
+                sl_resp = await self._rest.place_tpsl_order(
+                    symbol=symbol,
+                    position_id=position_id,
+                    sl_price=str(plan.stop_price),
+                    sl_qty=str(sl_qty),
+                )
+                sl_placed = True
+                if isinstance(sl_resp, dict) and sl_resp.get("orderId"):
+                    placed.append(str(sl_resp["orderId"]))
+            except Exception as exc:  # noqa: BLE001 - keep going so TPs still get placed
+                log.error(
+                    "exchange_sl_failed",
+                    error=str(exc),
+                    symbol=symbol,
+                    side=position_side.value,
+                )
 
-        legs = self._normalize_tp_legs(plan, pos_qty, instrument)
+        remainder_plan = ProtectionPlan(stop_price=plan.stop_price, take_profits=tp_legs)
+        legs = self._normalize_tp_legs(remainder_plan, pos_qty, instrument)
         tp_placed = 0
         for price, qty in legs:
             try:
@@ -279,10 +285,13 @@ class LiveBroker(Broker):
             resp = await self._rest.place_order(request)
             order_id = str(resp.get("orderId", local_id)) if isinstance(resp, dict) else local_id
 
+            bundled_sl = False
+            bundled_tp = 0
+            bundled_ok = True
             if not request.reduce_only:
                 # Verify the order actually produced a position before reporting a
                 # fill. A returned orderId only means the order was *accepted*.
-                filled_qty, entry, _pid = await self._confirm_open(
+                filled_qty, entry, pid = await self._confirm_open(
                     request.symbol,
                     request.position_side,
                     baseline_qty,
@@ -312,6 +321,15 @@ class LiveBroker(Broker):
                 fill_price = entry if entry > 0 else self._marks.get(
                     request.symbol, request.price or Decimal("0")
                 )
+                if request.protection is not None:
+                    bundled_sl = True
+                    bundled_tp = 1 if request.protection.take_profits else 0
+                    min_resting = 1 if bundled_sl else 0
+                    if pid:
+                        verified = await self._verify_tpsl(request.symbol, pid)
+                        bundled_ok = verified >= min_resting if min_resting else True
+                    else:
+                        bundled_ok = False
             else:
                 filled_qty = request.qty
                 fill_price = self._marks.get(request.symbol, request.price or Decimal("0"))
@@ -344,6 +362,9 @@ class LiveBroker(Broker):
                 reason=request.reason,
                 tag=request.tag,
                 fills=[fill],
+                bundled_sl=bundled_sl,
+                bundled_tp=bundled_tp,
+                bundled_protection_ok=bundled_ok,
             )
         except Exception as exc:  # noqa: BLE001 - surface as a rejected order
             log.error("live_order_failed", error=str(exc), symbol=request.symbol)

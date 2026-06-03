@@ -192,6 +192,8 @@ class OrderRequest:
     stop_price: Decimal | None = None
     reason: str = ""
     tag: str = ""
+    #: Live OPEN only: SL (+ first TP) sent on the entry ``place_order`` request.
+    protection: ProtectionPlan | None = None
 
     @property
     def notional_at(self) -> Decimal:
@@ -235,6 +237,10 @@ class Order:
     reason: str = ""
     tag: str = ""
     fills: list[Fill] = field(default_factory=list)
+    #: Set by :class:`LiveBroker` when entry carried bundled exchange TP/SL.
+    bundled_sl: bool = False
+    bundled_tp: int = 0
+    bundled_protection_ok: bool = True
 
 
 @dataclass(slots=True)

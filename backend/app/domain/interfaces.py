@@ -21,6 +21,7 @@ from app.domain.types import (
     OrderRequest,
     PositionSide,
     ProtectionPlan,
+    TakeProfitLeg,
 )
 
 
@@ -75,6 +76,8 @@ class Broker(abc.ABC):
         position_side: PositionSide,
         plan: ProtectionPlan,
         instrument: Instrument,
+        skip_sl: bool = False,
+        take_profits: tuple[TakeProfitLeg, ...] | None = None,
     ) -> dict | None:
         """After an entry fill, register TP/SL on the exchange (live broker only)."""
         return None
