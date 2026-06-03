@@ -44,6 +44,22 @@ def _dec(v: Any, d: str = "0") -> Decimal:
         return Decimal(d)
 
 
+def _entry_price(item: dict[str, Any], qty: Decimal) -> Decimal:
+    """Entry *price* for a Bitunix position.
+
+    ``avgOpenPrice`` is the average open price. ``entryValue`` is the position
+    notional (price x qty), so it must be divided by qty before use - never
+    treated as a price directly.
+    """
+    price = _dec(item.get("avgOpenPrice") or item.get("entryPrice"))
+    if price > 0:
+        return price
+    notional = _dec(item.get("entryValue"))
+    if notional > 0 and qty != 0:
+        return notional / qty.copy_abs()
+    return Decimal("0")
+
+
 class LiveBroker(Broker):
     """Routes orders to Bitunix and reflects exchange account state."""
 
@@ -82,9 +98,7 @@ class LiveBroker(Broker):
             if is_long != want_long:
                 continue
             pid = item.get("positionId") or item.get("position_id") or item.get("id")
-            entry = _dec(
-                item.get("avgOpenPrice") or item.get("entryPrice") or item.get("entryValue")
-            )
+            entry = _entry_price(item, qty)
             return (str(pid) if pid is not None else None, abs(qty), entry)
         return None, Decimal("0"), Decimal("0")
 
@@ -408,9 +422,7 @@ class LiveBroker(Broker):
             side_raw = str(item.get("side") or item.get("positionSide") or "LONG").upper()
             is_long = "LONG" in side_raw or "BUY" in side_raw
             side = PositionSide.LONG if is_long else PositionSide.SHORT
-            entry = _dec(
-                item.get("entryValue") or item.get("avgOpenPrice") or item.get("entryPrice")
-            )
+            entry = _entry_price(item, qty)
             leverage = int(_dec(item.get("leverage"), "1"))
             return Position(
                 symbol=str(item.get("symbol")),
