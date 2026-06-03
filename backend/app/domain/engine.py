@@ -771,20 +771,15 @@ class Engine:
         instrument: Instrument,
         entry: Decimal,
     ) -> dict | None:
-        """Place remainder TP/SL after a bundled entry, or fall back to full placement."""
-        _ = entry  # reserved for future fill-vs-plan qty adjustments
-        remainder = plan.take_profits[1:] if len(plan.take_profits) > 1 else ()
+        """Place TP legs after a bundled-SL entry, or fall back to full placement.
 
-        if order.bundled_protection_ok and not remainder:
-            return {
-                "position_id": None,
-                "sl_placed": order.bundled_sl,
-                "tp_placed": order.bundled_tp,
-                "tp_expected": len(plan.take_profits),
-                "verified_count": -1,
-                "error": None,
-                "bundled": True,
-            }
+        The SL is bundled with the entry ``place_order`` (full-position trigger).
+        All take-profit legs are placed here via ``tpsl/place_order`` so their
+        per-leg quantities (partial closes) are preserved. If the bundled SL did
+        not verify on the exchange, we fall back to placing the full plan (SL +
+        every TP) so the position is never left unprotected.
+        """
+        _ = entry  # reserved for future fill-vs-plan qty adjustments
 
         if not order.bundled_protection_ok:
             return await self.broker.place_exchange_protections(
@@ -794,20 +789,30 @@ class Engine:
                 instrument=instrument,
             )
 
+        if not plan.take_profits:
+            return {
+                "position_id": None,
+                "sl_placed": order.bundled_sl,
+                "tp_placed": 0,
+                "tp_expected": 0,
+                "verified_count": -1,
+                "error": None,
+                "bundled": True,
+            }
+
         post = await self.broker.place_exchange_protections(
             symbol=order.symbol,
             position_side=order.position_side,
             plan=plan,
             instrument=instrument,
             skip_sl=True,
-            take_profits=remainder,
+            take_profits=plan.take_profits,
         )
         if post is None:
             return post
         return {
             **post,
             "sl_placed": order.bundled_sl or post.get("sl_placed"),
-            "tp_placed": order.bundled_tp + int(post.get("tp_placed", 0)),
             "tp_expected": len(plan.take_profits),
         }
 

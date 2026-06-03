@@ -322,12 +322,14 @@ class LiveBroker(Broker):
                     request.symbol, request.price or Decimal("0")
                 )
                 if request.protection is not None:
+                    # Only the SL rides on the entry order (full-position trigger);
+                    # take-profit legs are placed separately so partial closes keep
+                    # their per-leg quantities.
                     bundled_sl = True
-                    bundled_tp = 1 if request.protection.take_profits else 0
-                    min_resting = 1 if bundled_sl else 0
+                    bundled_tp = 0
                     if pid:
                         verified = await self._verify_tpsl(request.symbol, pid)
-                        bundled_ok = verified >= min_resting if min_resting else True
+                        bundled_ok = verified >= 1
                     else:
                         bundled_ok = False
             else:

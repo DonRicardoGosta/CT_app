@@ -293,14 +293,15 @@ class BitunixRest:
         # Hedge mode requires the position direction.
         body["positionSide"] = "LONG" if request.position_side is PositionSide.LONG else "SHORT"
         if not request.reduce_only and request.protection is not None:
+            # Only the stop-loss is bundled with the entry. The trade endpoint has
+            # no tp/sl quantity field, so a bundled trigger closes the *whole*
+            # position at trigger time. That is correct for the SL (always a full
+            # close) but would break scaled/partial take-profits, which need
+            # per-leg quantities -> those go via tpsl/place_order after the fill.
             plan = request.protection
             body["slPrice"] = str(plan.stop_price)
             body["slStopType"] = "LAST_PRICE"
             body["slOrderType"] = "MARKET"
-            if plan.take_profits:
-                body["tpPrice"] = str(plan.take_profits[0].price)
-                body["tpStopType"] = "LAST_PRICE"
-                body["tpOrderType"] = "MARKET"
         return await self._request(
             "POST", "/api/v1/futures/trade/place_order", body=body, signed=True
         )

@@ -100,10 +100,12 @@ async def test_rest_place_order_includes_bundled_protection(btc_instrument: Inst
         protection=plan,
     )
     await rest.place_order(req)
+    # Only the SL is bundled with the entry; TP legs go via tpsl/place_order so
+    # partial-close quantities are preserved (the trade endpoint has no tpQty).
     assert captured[0]["slPrice"] == "98"
     assert captured[0]["slStopType"] == "LAST_PRICE"
-    assert captured[0]["tpPrice"] == "101"
-    assert captured[0]["tpOrderType"] == "MARKET"
+    assert captured[0]["slOrderType"] == "MARKET"
+    assert "tpPrice" not in captured[0]
 
 
 @pytest.mark.asyncio
@@ -145,7 +147,7 @@ async def test_submit_open_bundled_protection_verified(btc_instrument: Instrumen
     order = await broker.submit(req)
     assert order.status is OrderStatus.FILLED
     assert order.bundled_sl is True
-    assert order.bundled_tp == 1
+    assert order.bundled_tp == 0
     assert order.bundled_protection_ok is True
     sent = rest.place_order.await_args.args[0]
     assert sent.protection is plan
@@ -169,18 +171,24 @@ async def test_place_exchange_protections_skip_sl_places_tp_only(btc_instrument:
             TakeProfitLeg(price=Decimal("102"), qty=Decimal("0.7")),
         ),
     )
+    rest.place_tpsl_order = AsyncMock(
+        side_effect=[{"orderId": "tp-1"}, {"orderId": "tp-2"}]
+    )
     result = await broker.place_exchange_protections(
         symbol="BTCUSDT",
         position_side=PositionSide.LONG,
         plan=plan,
         instrument=btc_instrument,
         skip_sl=True,
-        take_profits=plan.take_profits[1:],
+        take_profits=plan.take_profits,
     )
-    assert rest.place_tpsl_order.await_count == 1
-    assert rest.place_tpsl_order.await_args.kwargs.get("sl_price") is None
+    # All TP legs placed, none of them an SL call (SL was bundled with entry).
+    assert rest.place_tpsl_order.await_count == 2
+    for call in rest.place_tpsl_order.await_args_list:
+        assert call.kwargs.get("sl_price") is None
+        assert call.kwargs.get("tp_price") is not None
     assert result["sl_placed"] is True
-    assert result["tp_placed"] == 1
+    assert result["tp_placed"] == 2
 
 
 @pytest.mark.asyncio
