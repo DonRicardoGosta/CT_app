@@ -148,6 +148,8 @@ class TrendScannerStrategy(Strategy):
 
     async def on_start(self, context: StrategyContext) -> None:
         self._exchange_protections = context.exchange_protections
+        for sym in self._symbols_with_open_position(context.account):
+            self._ensure_selected(sym)
 
     # ------------------------------------------------------------------ #
     # Universe & selection
@@ -170,9 +172,12 @@ class TrendScannerStrategy(Strategy):
             "target": self.p.max_symbols,
         }
 
-    def is_full(self) -> bool:
-        """True once we have committed to the maximum number of coins."""
-        return len(self._selected) >= self.p.max_symbols
+    def _open_symbol_count(self, account: AccountState) -> int:
+        return len(self._symbols_with_open_position(account))
+
+    def is_full(self, account: AccountState) -> bool:
+        """True when open positions reach ``max_symbols`` (from account snapshot)."""
+        return self._open_symbol_count(account) >= self.p.max_symbols
 
     def on_open_outcome(
         self,
@@ -232,7 +237,7 @@ class TrendScannerStrategy(Strategy):
         return symbol not in self._symbols_with_open_position(account)
 
     def _slot_free(self, account: AccountState) -> bool:
-        return len(self._selected) < self.p.max_symbols
+        return self._open_symbol_count(account) < self.p.max_symbols
 
     def release_symbol(self, symbol: str, account: AccountState) -> bool:
         """Free a watchlist slot when the symbol has no open position."""
@@ -245,17 +250,19 @@ class TrendScannerStrategy(Strategy):
             self._reset_trade(_key(symbol, side))
         return True
 
-    def next_scan_candidate(self) -> str | None:
-        """Return the next ranked coin not on the watchlist (round-robin)."""
-        if self.is_full() or not self._universe:
+    def next_scan_candidate(self, account: AccountState) -> str | None:
+        """Return the next ranked coin to scan (round-robin)."""
+        if self.is_full(account) or not self._universe:
             return None
+        open_syms = self._symbols_with_open_position(account)
         total = len(self._universe)
         for offset in range(total):
             idx = (self._scan_cursor + offset) % total
             symbol = self._universe[idx]
-            if symbol not in self._selected:
-                self._scan_cursor = (idx + 1) % total
-                return symbol
+            if symbol in self._selected or symbol in open_syms:
+                continue
+            self._scan_cursor = (idx + 1) % total
+            return symbol
         return None
 
     def _ensure_selected(self, symbol: str) -> None:
@@ -308,13 +315,14 @@ class TrendScannerStrategy(Strategy):
                 {**ctx_base, "check": "selected_waiting"},
             )
 
+        open_syms = self._symbols_with_open_position(context.account)
         if not self._slot_free(context.account):
             return (
-                f"slots full ({len(self._selected)}/{self.p.max_symbols} coins selected)",
+                f"slots full ({len(open_syms)}/{self.p.max_symbols} open positions)",
                 {
                     **ctx_base,
                     "check": "slots_full",
-                    "selected": list(self._selected),
+                    "open_positions": sorted(open_syms),
                 },
             )
 
@@ -531,11 +539,11 @@ class TrendScannerStrategy(Strategy):
         if steps >= self.p.max_entries:
             return None
 
-        # A slot is only consumed after a successful first fill (see on_open_outcome).
-        if symbol not in self._selected and not self._slot_free(account):
-            return None
-
         if steps == 0:
+            if not self._symbol_is_flat(symbol, account):
+                return None
+            if not self._slot_free(account):
+                return None
             # First entry: require a pullback that turns back toward the trend.
             if side is PositionSide.LONG:
                 triggered = prev_rsi <= self.p.rsi_pullback_long and cur_rsi > prev_rsi

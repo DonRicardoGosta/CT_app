@@ -17,10 +17,12 @@ from app.domain.clock import SimulatedClock
 from app.domain.engine import Engine, EngineSummary
 from app.domain.feeds.replay import ReplayFeed
 from app.domain.types import (
+    AccountState,
     Bar,
     Instrument,
     IntentAction,
     Mode,
+    Position,
     PositionSide,
 )
 from app.events.bus import InMemorySink
@@ -31,6 +33,10 @@ from app.strategies import create_strategy
 from app.strategies.indicators import rsi, sma
 
 _EPOCH = datetime(2024, 1, 1, tzinfo=UTC)
+
+
+def _empty_account() -> AccountState:
+    return AccountState(ts=_EPOCH, balance=Decimal("1000"), positions={})
 
 
 def test_rsi_basic_bounds_and_none():
@@ -243,12 +249,10 @@ def test_failed_first_entry_does_not_consume_selection_slot():
 
 
 def test_release_symbol_frees_watchlist_slot(btc_instrument):
-    from app.domain.types import AccountState
-
     strat = create_strategy("trend_scanner", {"max_symbols": 5})
     strat._ensure_selected("BTCUSDT")
     strat._ensure_selected("ETHUSDT")
-    empty = AccountState(ts=_EPOCH, balance=Decimal("1000"), positions={})
+    empty = _empty_account()
     assert strat.release_symbol("BTCUSDT", empty) is True
     assert "BTCUSDT" not in strat._selected
     assert len(strat._selected) == 1
@@ -256,8 +260,6 @@ def test_release_symbol_frees_watchlist_slot(btc_instrument):
 
 
 def test_release_symbol_keeps_coin_when_position_open():
-    from app.domain.types import AccountState, Position
-
     strat = create_strategy("trend_scanner", {"max_symbols": 5})
     strat._ensure_selected("BTCUSDT")
     acct = AccountState(
@@ -282,9 +284,95 @@ def test_next_scan_candidate_skips_selected():
     strat = create_strategy("trend_scanner", {"max_scan_rank": 5, "max_symbols": 5})
     strat.desired_symbols(instruments)
     strat._ensure_selected(list(instruments)[0])
-    nxt = strat.next_scan_candidate()
+    empty = _empty_account()
+    nxt = strat.next_scan_candidate(empty)
     assert nxt is not None
     assert nxt not in strat._selected
+
+
+def test_is_full_uses_open_positions_not_selected():
+    strat = create_strategy("trend_scanner", {"max_symbols": 2})
+    empty = _empty_account()
+    assert strat.is_full(empty) is False
+    acct = AccountState(
+        ts=_EPOCH,
+        balance=Decimal("1000"),
+        positions={
+            ("BTCUSDT", PositionSide.LONG): Position(
+                symbol="BTCUSDT",
+                position_side=PositionSide.LONG,
+                qty=Decimal("1"),
+                entry_price=Decimal("100"),
+                leverage=5,
+            ),
+            ("ETHUSDT", PositionSide.LONG): Position(
+                symbol="ETHUSDT",
+                position_side=PositionSide.LONG,
+                qty=Decimal("1"),
+                entry_price=Decimal("100"),
+                leverage=5,
+            ),
+        },
+    )
+    assert strat._selected == []
+    assert strat.is_full(acct) is True
+
+
+def test_first_entry_blocked_when_symbol_has_open_position():
+    strat = create_strategy("trend_scanner", {"max_symbols": 5})
+    acct = AccountState(
+        ts=_EPOCH,
+        balance=Decimal("1000"),
+        positions={
+            ("BTCUSDT", PositionSide.LONG): Position(
+                symbol="BTCUSDT",
+                position_side=PositionSide.LONG,
+                qty=Decimal("1"),
+                entry_price=Decimal("100"),
+                leverage=5,
+                step_count=1,
+            ),
+        },
+    )
+    intent = strat._entry_intent(
+        "BTCUSDT",
+        PositionSide.LONG,
+        None,
+        Decimal("101"),
+        Decimal("50"),
+        Decimal("48"),
+        acct,
+    )
+    assert intent is None
+
+
+def test_dca_entry_allowed_when_position_exists():
+    strat = create_strategy("trend_scanner", {"max_symbols": 5})
+    pos = Position(
+        symbol="BTCUSDT",
+        position_side=PositionSide.LONG,
+        qty=Decimal("1"),
+        entry_price=Decimal("100"),
+        leverage=5,
+        step_count=1,
+    )
+    acct = AccountState(
+        ts=_EPOCH,
+        balance=Decimal("1000"),
+        positions={("BTCUSDT", PositionSide.LONG): pos},
+    )
+    strat._last_entry[("BTCUSDT", "long")] = Decimal("100")
+    intent = strat._entry_intent(
+        "BTCUSDT",
+        PositionSide.LONG,
+        pos,
+        Decimal("98"),
+        Decimal("50"),
+        Decimal("48"),
+        acct,
+    )
+    assert intent is not None
+    assert intent.tag == "entry_2"
 
 
 def test_successful_first_entry_adds_to_selection():
@@ -472,8 +560,11 @@ async def test_prescan_evaluates_coins_one_by_one_until_target():
 
     # Coins were fetched one by one, in ranked order.
     assert history.calls[0] == "COIN00USDT"
-    # We stop once the target (2) is selected; we should not scan all 6.
-    assert len(strat._selected) == 2
+    # We stop once the target (2) open positions is reached; we should not scan all 6.
+    acct = await broker.account()
+    open_syms = strat._symbols_with_open_position(acct)
+    assert len(open_syms) == 2
+    assert strat.is_full(acct)
     assert len(history.calls) < 6
 
     # Each scanned coin produced a strategy log; no "waiting for candle" noise.
