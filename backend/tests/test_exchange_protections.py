@@ -40,11 +40,9 @@ def test_protection_plan_splits_tp_qty(btc_instrument: Instrument):
         "trend_scanner",
         {
             "tp1_pct": "1",
-            "tp1_close_pct": "30",
+            "tp1_close_pct": "35",
             "tp2_pct": "2",
-            "tp2_close_pct": "35",
-            "tp3_pct": "3",
-            "tp3_close_pct": "100",
+            "tp2_close_pct": "100",
             "stop_loss_pct": "1.2",
         },
     )
@@ -57,11 +55,11 @@ def test_protection_plan_splits_tp_qty(btc_instrument: Instrument):
     )
     assert plan is not None
     assert plan.stop_price == Decimal("98.8")
-    assert len(plan.take_profits) == 3
+    assert len(plan.take_profits) == 2
     assert plan.take_profits[0].price == Decimal("101.0")
-    assert plan.take_profits[0].qty == Decimal("0.300")
-    assert plan.take_profits[1].qty == Decimal("0.245")
-    assert plan.take_profits[2].qty == Decimal("0.455")
+    assert plan.take_profits[0].qty == Decimal("0.350")
+    assert plan.take_profits[1].price == Decimal("102.0")
+    assert plan.take_profits[1].qty == Decimal("0.650")
     total_tp = sum(leg.qty for leg in plan.take_profits)
     assert total_tp == Decimal("1")
 

@@ -12,7 +12,7 @@ Design goals (REQ-005/006):
   which gives better entries than a naive moving-average cross.
 * **Multiple entries (DCA ladder)** — add up to ``max_entries`` steps on further
   pullbacks spaced by ``entry_spacing_pct``.
-* **Multiple take-profits** — scale out at TP1/TP2/TP3 (return-on-margin levels),
+* **Multiple take-profits** — scale out at TP1/TP2 (price-move levels),
   closing a fraction of the remaining position at each.
 * **Multiple / moving stops** — an initial stop that moves to breakeven after the
   first take-profit and then trails the best price after the second. The stop
@@ -94,12 +94,10 @@ class TrendScannerParams(BaseModel):
     # independent and directly comparable to the round-trip fee (~0.12% at a
     # 0.06% taker fee). ROE shown in the UI = price move x leverage.
     tp1_pct: Decimal = Field(default=Decimal("1.0"), description="TP1 price move percent.")
-    tp1_close_pct: Decimal = Field(default=Decimal("30"), description="TP1 close % of position.")
+    tp1_close_pct: Decimal = Field(default=Decimal("35"), description="TP1 close % of position.")
     tp2_pct: Decimal = Field(default=Decimal("2.5"), description="TP2 price move percent.")
-    tp2_close_pct: Decimal = Field(default=Decimal("35"), description="TP2 close % of remainder.")
-    tp3_pct: Decimal = Field(default=Decimal("6.0"), description="TP3 price move percent.")
-    tp3_close_pct: Decimal = Field(
-        default=Decimal("100"), description="TP3 close % of remainder."
+    tp2_close_pct: Decimal = Field(
+        default=Decimal("100"), description="TP2 close % of remainder."
     )
 
     # -- stops --------------------------------------------------------------- #
@@ -107,10 +105,10 @@ class TrendScannerParams(BaseModel):
         default=Decimal("1.2"), description="Initial stop distance (price percent)."
     )
     breakeven_after_tp: int = Field(
-        default=1, ge=0, le=3, description="Move stop to breakeven after this many TPs hit (0=off)."
+        default=1, ge=0, le=2, description="Move stop to breakeven after this many TPs hit (0=off)."
     )
     trail_after_tp: int = Field(
-        default=2, ge=0, le=3, description="Start trailing after this many TPs hit (0=off)."
+        default=2, ge=0, le=2, description="Start trailing after this many TPs hit (0=off)."
     )
     trail_pct: Decimal = Field(
         default=Decimal("1.5"), description="Trailing stop distance (percent) from the best price."
@@ -384,7 +382,6 @@ class TrendScannerStrategy(Strategy):
         return [
             (self.p.tp1_pct, self.p.tp1_close_pct / Decimal(100)),
             (self.p.tp2_pct, self.p.tp2_close_pct / Decimal(100)),
-            (self.p.tp3_pct, self.p.tp3_close_pct / Decimal(100)),
         ]
 
     def _initial_stop(self, price: Decimal, side: PositionSide) -> Decimal:
