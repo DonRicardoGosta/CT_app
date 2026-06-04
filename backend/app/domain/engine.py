@@ -323,10 +323,43 @@ class Engine:
                 source="strategy",
             )
             account = await self.broker.account()  # refresh between intents
-            result = self.sizer.size(intent, account, instrument, price)
             first_entry = (
                 intent.action is IntentAction.OPEN and intent.tag == "entry_1"
             )
+            if first_entry and self.mode is Mode.LIVE:
+                open_syms = self._open_symbols(account)
+                max_symbols = int(getattr(self.strategy.params, "max_symbols", 0) or 0)
+                if intent.symbol in open_syms:
+                    summary.rejected += 1
+                    await self._emit_signal_rejection(
+                        intent,
+                        "symbol already has an open position on the exchange",
+                    )
+                    self.strategy.on_open_outcome(
+                        intent.symbol,
+                        intent.position_side,
+                        success=False,
+                        first_entry=True,
+                    )
+                    if ctx is not None:
+                        await self._refresh_selection(ctx)
+                    continue
+                if max_symbols > 0 and len(open_syms) >= max_symbols:
+                    summary.rejected += 1
+                    await self._emit_signal_rejection(
+                        intent,
+                        f"max open positions reached ({len(open_syms)}/{max_symbols})",
+                    )
+                    self.strategy.on_open_outcome(
+                        intent.symbol,
+                        intent.position_side,
+                        success=False,
+                        first_entry=True,
+                    )
+                    if ctx is not None:
+                        await self._refresh_selection(ctx)
+                    continue
+            result = self.sizer.size(intent, account, instrument, price)
             if not result.ok or result.request is None:
                 summary.rejected += 1
                 await self._emit_signal_rejection(intent, result.reason)
@@ -496,8 +529,9 @@ class Engine:
         self._in_replacement_scan = True
         try:
             tried = 0
-            while not is_full() and tried < universe_len:
-                symbol = next_candidate()
+            account = await self.broker.account()
+            while not is_full(account) and tried < universe_len:
+                symbol = next_candidate(account)
                 if symbol is None:
                     break
                 tried += 1
@@ -580,24 +614,30 @@ class Engine:
             context={"total": total, "target": self._target, "interval": self._interval},
         )
 
-        is_full = getattr(self.strategy, "is_full", lambda: False)
+        is_full = getattr(self.strategy, "is_full", None)
         cadence = int(getattr(self.strategy.params, "scan_universe", 30) or 30)
         scanned = 0
+        account = await self.broker.account()
         for symbol in self._universe:
             if self._stop:
                 break
-            if is_full():
+            if is_full is not None and is_full(account):
+                open_count = len(self._open_symbols(account))
                 await self._emit_log(
                     "strategy",
                     "info",
-                    f"target reached: {len(self._selected)}/{self._target} coins "
-                    f"selected after scanning {scanned}/{total}",
-                    context={"selected": list(self._selected)},
+                    f"target reached: {open_count}/{self._target} open positions "
+                    f"after scanning {scanned}/{total}",
+                    context={
+                        "open_positions": open_count,
+                        "selected": list(self._selected),
+                    },
                 )
                 break
             scanned += 1
             await self._evaluate_symbol_scan(symbol, instruments, summary)
             acct = await self.broker.account()
+            account = acct
             ctx_snap = self._strategy_context(
                 event=placeholder,
                 account=acct,
