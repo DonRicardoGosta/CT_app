@@ -177,6 +177,43 @@ async def persist_events(session: AsyncSession, events: list[BaseEvent]) -> int:
     return written
 
 
+async def upsert_run_config(
+    session: AsyncSession,
+    *,
+    run_id: str,
+    strategy: str,
+    mode: str,
+    status: str,
+    config: dict[str, Any],
+    started_at: datetime,
+) -> None:
+    """Persist the launch config of a run (control-plane write, not the hot path).
+
+    Stored when a run is requested so the UI can show what parameters a job
+    started with and reload them later. Status/finished_at are owned by the
+    event-driven ``_upsert_run`` and are left untouched on conflict.
+    """
+    stmt = pg_insert(Run).values(
+        id=run_id,
+        strategy=strategy,
+        mode=mode,
+        status=status,
+        started_at=started_at,
+        finished_at=None,
+        config=config,
+        summary={},
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[Run.id],
+        set_={
+            "config": stmt.excluded.config,
+            "strategy": stmt.excluded.strategy,
+            "mode": stmt.excluded.mode,
+        },
+    )
+    await session.execute(stmt)
+
+
 async def _upsert_run(session: AsyncSession, e: RunEvent) -> None:
     now: datetime = e.ts
     values = {

@@ -8,7 +8,7 @@ control topic).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decrypt_secret
+from app.db import repositories as repo
 from app.db.models import ApiKey, RiskConfig
 from app.db.session import get_session
 from app.domain.types import Mode
@@ -88,6 +89,20 @@ async def start_run(
             raise HTTPException(404, "api key not found")
         api_key = row.api_key
         secret = decrypt_secret(row.secret_encrypted)
+
+    # Persist the launch config now (control-plane write) so the run appears as a
+    # job immediately and the UI can show/reload the exact parameters it started
+    # with. The config never contains secrets (only ``api_key_id``).
+    await repo.upsert_run_config(
+        session,
+        run_id=config.run_id,
+        strategy=config.strategy,
+        mode=str(config.mode),
+        status="starting",
+        config=config.model_dump(mode="json"),
+        started_at=datetime.now(UTC),
+    )
+    await session.commit()
 
     command = ControlCommand(
         action="start", config=config, api_key=api_key, secret_key=secret
