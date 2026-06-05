@@ -64,6 +64,24 @@ export default function TradingWorkspace({ mode = "live" }: { mode?: TradeMode }
 
   const activeSymbol = active || symbols[0] || "";
 
+  // True 24h change from the exchange ticker (not the loaded candle window).
+  const tickers = useQuery({
+    queryKey: ["tickers", symbols],
+    queryFn: () => endpoints.tickers(symbols),
+    enabled: symbols.length > 0,
+    refetchInterval: 15000,
+    staleTime: 10000,
+  });
+  const change24hBySymbol = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const t of tickers.data ?? []) {
+      if (t.change_24h_pct != null && isFinite(t.change_24h_pct)) {
+        map[t.symbol] = t.change_24h_pct;
+      }
+    }
+    return map;
+  }, [tickers.data]);
+
   const klines = useQuery({
     queryKey: ["klines", activeSymbol, interval],
     queryFn: () => endpoints.klines({ symbol: activeSymbol, interval, limit: 300 }),
@@ -125,13 +143,17 @@ export default function TradingWorkspace({ mode = "live" }: { mode?: TradeMode }
   }, [positions, activeSymbol]);
 
   const summary = symbolSummaries[activeSymbol];
+  // 24h change comes from the ticker field; fall back to the loaded candle
+  // window only if the ticker has not loaded yet.
   const change = useMemo(() => {
+    const t = change24hBySymbol[activeSymbol];
+    if (t != null && isFinite(t)) return t;
     if (candles.length < 2) return null;
     const first = candles[0].c;
     const last = livePrice ?? candles[candles.length - 1].c;
     if (!first) return null;
     return ((last - first) / first) * 100;
-  }, [candles, livePrice]);
+  }, [change24hBySymbol, activeSymbol, candles, livePrice]);
 
   if (!runActive) {
     return (
@@ -209,6 +231,7 @@ export default function TradingWorkspace({ mode = "live" }: { mode?: TradeMode }
               symbol={sym}
               active={sym === activeSymbol}
               price={prices[sym]}
+              change24h={change24hBySymbol[sym]}
               spark={spark}
               summary={symbolSummaries[sym]}
               onClick={() => setActive(sym)}
@@ -237,6 +260,7 @@ export default function TradingWorkspace({ mode = "live" }: { mode?: TradeMode }
                 <span className={`text-sm ${change >= 0 ? "text-up" : "text-down"}`}>
                   {change >= 0 ? "+" : ""}
                   {change.toFixed(2)}%
+                  <span className="ml-1 text-xs text-muted">24h</span>
                 </span>
               )}
               {summary && <Badge tone="muted">{summary.status}</Badge>}
