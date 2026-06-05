@@ -25,12 +25,15 @@ interface RiskForm {
   allow_hedge: boolean;
 }
 
+// Defaults match the recommended preset for a small, capped account
+// (~50 USD capital, 5 USDT committed margin per step, 20x), which is what the
+// guarded_ladder strategy is tuned for.
 const DEFAULT_RISK: RiskForm = {
-  min_investment_usd: "1",
-  max_capital_usd: "100",
-  max_loss_usd: "50",
-  base_leverage: "5",
-  max_leverage: "20",
+  min_investment_usd: "5",
+  max_capital_usd: "50",
+  max_loss_usd: "30",
+  base_leverage: "20",
+  max_leverage: "50",
   leverage_step: "1",
   allow_hedge: true,
 };
@@ -76,7 +79,7 @@ export default function Strategies() {
   const [params, setParams] = useState<FormValue>({});
   const [mode, setMode] = useState("dry_run");
   const [symbols, setSymbols] = useState("");
-  const [capital, setCapital] = useState("1000");
+  const [capital, setCapital] = useState("50");
   const [apiKeyId, setApiKeyId] = useState<string>("");
   const [risk, setRisk] = useState<RiskForm>(DEFAULT_RISK);
   const [result, setResult] = useState<string>("");

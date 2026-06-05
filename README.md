@@ -40,7 +40,7 @@ never slow down trading (REQ-004).
 | Path | Purpose |
 | --- | --- |
 | `backend/app/domain/` | Mode-agnostic core: `Clock`, `MarketDataFeed`, `Broker`, `Engine`. |
-| `backend/app/strategies/` | Pluggable strategies + registry, incl. `autoscan_ladder`. |
+| `backend/app/strategies/` | Pluggable strategies + registry: `autoscan_ladder`, `trend_scanner`, `guarded_ladder`. |
 | `backend/app/risk/` | Capital & leverage sizing (min investment, multiplier escalation). |
 | `backend/app/exchange/bitunix/` | REST signing + WS client. |
 | `backend/app/events/` | Kafka event schemas, producer, consumer. |
@@ -83,6 +83,46 @@ cd frontend
 npm install
 npm run dev
 ```
+
+## Strategies
+
+| Name | Idea |
+| --- | --- |
+| `autoscan_ladder` | EMA(fast)/EMA(slow) cross with laddered entries. |
+| `trend_scanner` | Trend regime + RSI-pullback entries with scaled exits. |
+| `guarded_ladder` | Breakout/momentum trend entries with DCA add-ins, an arbitrary number of scaled take-profit legs, a multi-stage moving stop, and a **capital-drawdown kill switch**. |
+
+### `guarded_ladder`
+
+Designed for a small, capped account. It trades many coins, opens multiple entries
+per coin (DCA on pullbacks), takes profit at an arbitrary number of scaled legs
+(`tp_levels_pct` / `tp_close_pct`, comma-separated), and runs a moving stop
+(initial → breakeven → trailing). Its defining feature is a **capital-drawdown kill
+switch**: once equity falls `max_drawdown_pct` (default `60`) below the starting
+capital, it flattens all positions and stops opening new ones for the rest of the run
+("stop trading after losing 60% of capital").
+
+Defaults were tuned against real Bitunix data (BTC/ETH/SOL/XRP/BNB/DOGE) and were net
+profitable across the basket on the **5m and 15m** intervals (the recommended
+timeframes); the 1h timeframe performed worse. Past backtest performance never
+guarantees future results — always re-validate with a backtest before going live.
+
+**Recommended risk preset (Risk & capital panel)** for the ~50 USD / 5 USDT-margin /
+20x setup:
+
+| Field | Value |
+| --- | --- |
+| `max_capital_usd` | `50` |
+| `min_investment_usd` | `5` |
+| `base_leverage` | `20` |
+| `max_leverage` | `50` (lets the sizer escalate to meet exchange minimums) |
+| `leverage_step` | `1` |
+| `max_loss_usd` | `30` |
+
+`max_capital_usd = 50` with 5 USD/step caps total deployed margin; the 60% halt lives
+in the strategy (`max_drawdown_pct`). With many coins and 20x, simultaneous correlated
+positions raise account drawdown — lowering `max_symbols` (e.g. to 3–5) reduces that
+risk if the kill switch trips too often.
 
 ## Modes
 
