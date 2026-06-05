@@ -111,9 +111,11 @@ class GuardedLadderParams(BaseModel):
     )
 
     # -- multiple entries (DCA ladder) -------------------------------------- #
-    max_entries: int = Field(default=4, ge=1, le=50, description="Max entries per coin/side.")
+    # Backtests on real Bitunix data favour a small number of adds on pullbacks,
+    # which lower the average entry without over-committing the capped account.
+    max_entries: int = Field(default=2, ge=1, le=50, description="Max entries per coin/side.")
     entry_spacing_pct: Decimal = Field(
-        default=Decimal("0.6"),
+        default=Decimal("0.8"),
         description="Adverse price move (percent) required before adding the next entry.",
     )
 
@@ -121,18 +123,20 @@ class GuardedLadderParams(BaseModel):
     # Targets are price-move percentages (leverage independent). ROE shown in the
     # UI = price move x leverage. ``tp_close_pct`` closes that fraction of the
     # *remaining* position at each leg; the final leg always closes the rest.
+    # The default banks a partial profit at +2% and lets the runner trail (the
+    # +12% leg is a far backstop), which validated best across coins and 5m/15m.
     tp_levels_pct: str = Field(
-        default="0.8,1.6,3.0",
-        description="Comma-separated take-profit price-move percentages (e.g. '0.8,1.6,3.0').",
+        default="2.0,12",
+        description="Comma-separated take-profit price-move percentages (e.g. '2.0,12').",
     )
     tp_close_pct: str = Field(
-        default="40,40,100",
+        default="40,100",
         description="Comma-separated close percent of the remainder at each TP leg.",
     )
 
     # -- layered / moving stop ---------------------------------------------- #
     stop_loss_pct: Decimal = Field(
-        default=Decimal("1.2"), description="Initial stop distance (price percent)."
+        default=Decimal("2.0"), description="Initial stop distance (price percent)."
     )
     breakeven_after_tp: int = Field(
         default=1,
@@ -141,13 +145,13 @@ class GuardedLadderParams(BaseModel):
         description="Move the stop to breakeven after this many TP legs hit (0=off).",
     )
     trail_after_tp: int = Field(
-        default=2,
+        default=1,
         ge=0,
         le=50,
         description="Start trailing the stop after this many TP legs hit (0=off).",
     )
     trail_pct: Decimal = Field(
-        default=Decimal("1.2"),
+        default=Decimal("3.0"),
         description="Trailing stop distance (percent) from the best price.",
     )
 
