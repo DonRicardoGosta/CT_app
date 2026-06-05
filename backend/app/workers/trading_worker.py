@@ -11,7 +11,7 @@ import asyncio
 import contextlib
 
 from app.core.config import get_settings
-from app.core.logging import configure_logging, get_logger
+from app.core.logging import configure_logging, get_logger, set_log_event_sink
 from app.events.bus import KafkaSink
 from app.events.consumer import KafkaEventConsumer
 from app.events.control import ControlCommand
@@ -28,6 +28,9 @@ async def run() -> None:
 
     sink = KafkaSink(settings.kafka_bootstrap_servers, topics)
     await sink.start()
+    # Mirror WARNING+ structlog records (REST/WS/Kafka failures, etc.) to the bus
+    # so they appear in the Logs UI at their real severity, not buried as info.
+    set_log_event_sink(sink, asyncio.get_running_loop())
     manager = RunManager(sink)
 
     from app.services.metrics import start_sampler
@@ -46,6 +49,7 @@ async def run() -> None:
         async for _topic, payload in consumer.messages():
             await _handle_command(manager, payload)
     finally:
+        set_log_event_sink(None)
         metrics_task.cancel()
         with contextlib.suppress(Exception):
             await metrics_task

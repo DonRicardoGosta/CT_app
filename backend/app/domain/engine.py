@@ -288,20 +288,9 @@ class Engine:
         ctx: StrategyContext | None = None,
     ) -> None:
         for intent in intents:
+            # The SignalEvent itself is a first-class, queryable event and shows
+            # up in the Logs feed via the signals table — no duplicate info log.
             await self._emit_signal(intent)
-            await self._emit_log(
-                "signal",
-                "info",
-                f"signal {intent.action.value}: {intent.side.value} {intent.symbol}",
-                context={
-                    "symbol": intent.symbol,
-                    "side": intent.side.value,
-                    "action": intent.action.value,
-                    "position_side": intent.position_side.value,
-                    "reason": intent.reason,
-                    "tag": intent.tag,
-                },
-            )
             instrument = instruments.get(intent.symbol)
             if instrument is None:
                 await self._emit_error("sizer", f"unknown instrument {intent.symbol}")
@@ -390,22 +379,9 @@ class Engine:
                 if entry_plan is not None:
                     submit_request = replace(result.request, protection=entry_plan)
             order = await self.broker.submit(submit_request)
+            # OrderEvent is persisted and surfaced in the Logs feed via the orders
+            # table; no duplicate info log entry.
             await self._emit_order(order)
-            await self._emit_log(
-                "order",
-                "info",
-                f"order {order.status.value}: {order.side.value} {order.symbol} qty={order.qty}",
-                context={
-                    "order_id": order.id,
-                    "symbol": order.symbol,
-                    "side": order.side.value,
-                    "position_side": order.position_side.value,
-                    "qty": order.qty,
-                    "leverage": order.leverage,
-                    "reason": order.reason,
-                    "tag": order.tag,
-                },
-            )
             summary.orders += 1
             if order.status is not OrderStatus.FILLED:
                 await self._emit_symbol_summary(order.symbol, status="pending_order")
@@ -421,22 +397,9 @@ class Engine:
             if order.status is OrderStatus.FILLED:
                 summary.fills += len(order.fills)
                 for fill in order.fills:
+                    # FillEvent is persisted and shown in the Logs feed via the
+                    # fills table; no duplicate info log entry.
                     await self._emit_fill(fill)
-                    await self._emit_log(
-                        "fill",
-                        "info",
-                        f"fill {fill.side.value}: {fill.symbol} qty={fill.qty} @ {fill.price}",
-                        context={
-                            "order_id": fill.order_id,
-                            "symbol": fill.symbol,
-                            "side": fill.side.value,
-                            "position_side": fill.position_side.value,
-                            "qty": fill.qty,
-                            "price": fill.price,
-                            "fee": fill.fee,
-                            "realized_pnl": fill.realized_pnl,
-                        },
-                    )
                 await self._emit_positions_for(order.symbol)
                 entry = order.avg_fill_price or price
                 tps, stops = self._levels(
