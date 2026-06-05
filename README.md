@@ -104,7 +104,8 @@ capital, it flattens all positions and stops opening new ones for the rest of th
 
 Defaults were tuned against real Bitunix data (BTC/ETH/SOL/XRP/BNB/DOGE) and were net
 profitable across the basket on the **5m and 15m** intervals (the recommended
-timeframes); the 1h timeframe performed worse. Past backtest performance never
+timeframes); 1m whipsaws this breakout logic badly and 1h performed worse, so the
+launcher defaults the candle interval to **15m**. Past backtest performance never
 guarantees future results — always re-validate with a backtest before going live.
 
 **Recommended risk preset (Risk & capital panel)** for the ~50 USD / 5 USDT-margin /

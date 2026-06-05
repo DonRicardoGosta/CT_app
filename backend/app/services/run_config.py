@@ -29,7 +29,8 @@ class RunConfig(BaseModel):
     # Symbols to trade. Empty -> let the strategy auto-select (live) or use all
     # symbols present in the historical data (backtest).
     symbols: list[str] = Field(default_factory=list)
-    interval: str = "1m"
+    # 15m is the recommended/validated default; 1m whipsaws breakout strategies.
+    interval: str = "15m"
     initial_capital: Decimal = Decimal("1000")
 
     # Live/dry-run only: which stored API key to use (live order routing).
