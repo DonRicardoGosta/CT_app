@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from app.core.logging import get_logger
 from app.domain.engine import Engine
 from app.events.bus import EventSink
-from app.events.schemas import ErrorEvent
+from app.events.schemas import ErrorEvent, RunEvent
 from app.services.builder import build_engine
 from app.services.run_config import RunConfig
 
@@ -94,6 +94,10 @@ class RunManager:
             )
         except asyncio.CancelledError:
             self._set_status(run_id, "stopped")
+            # The engine never sees this cancellation as a normal finish, so emit
+            # the terminal run event here; otherwise the run is stuck "started"
+            # in the DB and the UI keeps showing it as a running job.
+            await self._emit_run_event(run_id, engine.mode.value, "stopped")
             await self.emit_log(
                 run_id=run_id,
                 mode=engine.mode.value,
@@ -120,6 +124,22 @@ class RunManager:
         handle.engine.request_stop()
         handle.task.cancel()
         return True
+
+    async def _emit_run_event(
+        self, run_id: str, mode: str, status: str, detail: str = ""
+    ) -> None:
+        handle = self._runs.get(run_id)
+        strategy = handle.config.strategy if handle is not None else ""
+        await self._sink.emit(
+            RunEvent(
+                run_id=run_id,
+                mode=mode,
+                ts=datetime.now(UTC),
+                strategy=strategy,
+                status=status,
+                detail=detail,
+            )
+        )
 
     async def emit_log(
         self,

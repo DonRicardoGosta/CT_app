@@ -36,7 +36,7 @@ export default function SchemaForm({
         const current = value[key] ?? prop.default ?? "";
         if (prop.type === "boolean") {
           return (
-            <Field key={key} label={label}>
+            <Field key={key} label={label} hint={prop.description}>
               <Select
                 value={String(current)}
                 onChange={(e) => set(key, e.target.value === "true")}
@@ -48,7 +48,7 @@ export default function SchemaForm({
           );
         }
         return (
-          <Field key={key} label={label}>
+          <Field key={key} label={label} hint={prop.description}>
             <Input
               type={isNumeric(prop) ? "number" : "text"}
               step="any"

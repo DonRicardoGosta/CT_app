@@ -78,6 +78,13 @@ async def test_workspace_events_emitted(bars, instruments):
     assert any(log.severity == "info" and log.source == "engine" for log in logs)
     assert any("scanning" in log.message for log in logs)
 
+    # Order/fill/signal already have dedicated first-class events, so the engine
+    # must not also emit duplicate info log entries for them (kept the Logs feed
+    # from being flooded with info that buries real warnings/errors).
+    assert not [
+        log for log in logs if log.source in {"order", "fill", "signal"}
+    ], "redundant per-order/fill/signal info logs should no longer be emitted"
+
 
 def test_take_profit_price_uses_leverage(instruments):
     """TP% is ROE on margin, so the price move must be divided by leverage."""

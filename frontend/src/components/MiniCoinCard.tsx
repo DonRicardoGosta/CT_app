@@ -15,6 +15,7 @@ export default function MiniCoinCard({
   symbol,
   active,
   price,
+  change24h,
   spark,
   summary,
   onClick,
@@ -22,6 +23,7 @@ export default function MiniCoinCard({
   symbol: string;
   active: boolean;
   price?: number;
+  change24h?: number;
   spark: number[];
   summary?: SymbolSummary;
   onClick: () => void;
@@ -47,7 +49,15 @@ export default function MiniCoinCard({
         <span className="text-sm font-semibold">{symbol}</span>
         <Badge tone={statusTone(summary?.status, side)}>{label}</Badge>
       </div>
-      <div className="num mt-1 text-lg font-semibold">{price != null ? usd(price) : "—"}</div>
+      <div className="mt-1 flex items-baseline justify-between gap-2">
+        <span className="num text-lg font-semibold">{price != null ? usd(price) : "—"}</span>
+        {change24h != null && isFinite(change24h) && (
+          <span className={`num text-xs ${change24h >= 0 ? "text-up" : "text-down"}`}>
+            {change24h >= 0 ? "+" : ""}
+            {change24h.toFixed(2)}%
+          </span>
+        )}
+      </div>
       <div className="mt-1 h-11">
         {spark.length > 1 ? (
           <Sparkline values={spark} up={up} height={44} />

@@ -7,7 +7,6 @@ lockstep with the ORM and avoiding hand-maintained DDL drift.
 from __future__ import annotations
 
 from alembic import op
-
 from app.db import models  # noqa: F401 - register tables on the metadata
 
 revision = "0002_resource_metrics"
