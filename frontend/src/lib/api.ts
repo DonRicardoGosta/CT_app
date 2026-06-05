@@ -63,6 +63,18 @@ export interface RiskConfig {
   fee_rate: string;
 }
 
+export interface RunConfig {
+  mode?: string;
+  strategy?: string;
+  params?: Record<string, unknown>;
+  risk?: Record<string, unknown>;
+  symbols?: string[];
+  interval?: string;
+  initial_capital?: string | number;
+  api_key_id?: number | null;
+  [key: string]: unknown;
+}
+
 export interface RunRow {
   id: string;
   strategy: string;
@@ -70,6 +82,7 @@ export interface RunRow {
   status: string;
   started_at: string;
   finished_at: string | null;
+  config: RunConfig | null;
   summary: Record<string, unknown>;
 }
 
@@ -133,7 +146,38 @@ export const endpoints = {
     if (args.limit) params.set("limit", String(args.limit));
     return api.get<Kline[]>(`/market/klines?${params.toString()}`);
   },
+  tickers: (symbols?: string[]) => {
+    const q = symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(","))}` : "";
+    return api.get<Ticker[]>(`/market/tickers${q}`);
+  },
+  strategyConfigs: () => api.get<StrategyConfigRow[]>("/config/strategy-configs"),
+  createStrategyConfig: (b: StrategyConfigIn) =>
+    api.post<StrategyConfigRow>("/config/strategy-configs", b),
+  deleteStrategyConfig: (id: number) => api.del<void>(`/config/strategy-configs/${id}`),
 };
+
+export interface Ticker {
+  symbol: string;
+  last: string | null;
+  change_24h_pct: number | null;
+}
+
+export interface StrategyConfigIn {
+  name: string;
+  strategy: string;
+  params: Record<string, unknown>;
+  risk_config_id?: number | null;
+  enabled?: boolean;
+}
+
+export interface StrategyConfigRow {
+  id: number;
+  name: string;
+  strategy: string;
+  params: Record<string, unknown>;
+  risk_config_id: number | null;
+  enabled: boolean;
+}
 
 export interface Kline {
   t: number;

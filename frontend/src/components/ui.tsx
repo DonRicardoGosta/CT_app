@@ -122,11 +122,20 @@ export function Empty({ children }: { children: ReactNode }) {
   return <div className="py-10 text-center text-sm text-muted">{children}</div>;
 }
 
-export function Field({ label, children }: { label: string; children: ReactNode }) {
+export function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: ReactNode;
+  children: ReactNode;
+}) {
   return (
     <label className="flex flex-col gap-1 text-sm">
       <span className="text-xs text-muted">{label}</span>
       {children}
+      {hint && <span className="text-[11px] leading-snug text-muted/80">{hint}</span>}
     </label>
   );
 }
