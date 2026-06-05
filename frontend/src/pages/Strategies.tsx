@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { endpoints, type RunConfig, type RunRow } from "@/lib/api";
 import SchemaForm, { defaultsFromSchema, type FormValue } from "@/components/SchemaForm";
+import IntervalSelector, { type Interval } from "@/components/IntervalSelector";
 import { Badge, Button, Card, CardTitle, Empty, Field, Input, Select } from "@/components/ui";
 import { time } from "@/lib/format";
 
@@ -79,6 +80,9 @@ export default function Strategies() {
   const [params, setParams] = useState<FormValue>({});
   const [mode, setMode] = useState("dry_run");
   const [symbols, setSymbols] = useState("");
+  // Candle interval the strategy trades on. 15m is the recommended/validated
+  // default — 1m whipsaws breakout strategies badly.
+  const [interval, setInterval] = useState<Interval>("15m");
   const [capital, setCapital] = useState("50");
   const [apiKeyId, setApiKeyId] = useState<string>("");
   const [risk, setRisk] = useState<RiskForm>(DEFAULT_RISK);
@@ -106,6 +110,7 @@ export default function Strategies() {
         strategy,
         params,
         symbols: symbols.split(",").map((s) => s.trim()).filter(Boolean),
+        interval,
         initial_capital: capital,
         api_key_id: apiKeyId ? Number(apiKeyId) : null,
         risk: {
@@ -133,6 +138,7 @@ export default function Strategies() {
       setParams(cfg.params as FormValue);
     }
     if (cfg.mode) setMode(String(cfg.mode));
+    if (cfg.interval) setInterval(cfg.interval as Interval);
     setSymbols((cfg.symbols ?? []).join(", "));
     if (cfg.initial_capital != null) setCapital(String(cfg.initial_capital));
     setApiKeyId(cfg.api_key_id != null ? String(cfg.api_key_id) : "");
@@ -206,16 +212,24 @@ export default function Strategies() {
               )}
             </div>
 
-            <Field
-              label="Symbols (comma separated)"
-              hint="Coins to trade. Leave empty to let the strategy auto-select by 24h volume."
-            >
-              <Input
-                placeholder="BTCUSDT, ETHUSDT"
-                value={symbols}
-                onChange={(e) => setSymbols(e.target.value)}
-              />
-            </Field>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto]">
+              <Field
+                label="Symbols (comma separated)"
+                hint="Coins to trade. Leave empty to let the strategy auto-select by 24h volume."
+              >
+                <Input
+                  placeholder="BTCUSDT, ETHUSDT"
+                  value={symbols}
+                  onChange={(e) => setSymbols(e.target.value)}
+                />
+              </Field>
+              <Field
+                label="Candle interval"
+                hint="Timeframe the strategy trades on. 15m (or 5m) is recommended; 1m whipsaws breakout strategies."
+              >
+                <IntervalSelector value={interval} onChange={setInterval} />
+              </Field>
+            </div>
 
             {mode === "live" && (
               <Field

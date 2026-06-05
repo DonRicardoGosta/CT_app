@@ -35,7 +35,7 @@ class StartRunIn(BaseModel):
     risk: RiskParams | None = None
     risk_config_id: int | None = None
     symbols: list[str] = []
-    interval: str = "1m"
+    interval: str = "15m"
     initial_capital: Decimal = Decimal("1000")
     api_key_id: int | None = None
     backtest_start: datetime | None = None
