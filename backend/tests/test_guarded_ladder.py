@@ -246,6 +246,35 @@ async def test_backtest_is_net_profitable_on_clean_uptrend():
 # --------------------------------------------------------------------------- #
 # Moving stop
 # --------------------------------------------------------------------------- #
+def test_records_a_decision_log_every_evaluated_candle():
+    """Each evaluated candle logs an outcome (not deduped), so the user can see
+    that every coin was actually checked and why it did/did not trade."""
+    strat = create_strategy("guarded_ladder", _test_params())
+    # Flat uptrend with no breakout setup yet -> a 'checked ...' reason each call.
+    prices = [100.0 + i * 0.01 for i in range(60)]
+    bars = _bars_from_prices("BTCUSDT", prices)
+    market = MarketState()
+    for b in bars:
+        market.update_bar(b)
+    from app.strategies.base import StrategyContext
+
+    acct = AccountState(ts=_EPOCH, balance=Decimal("50"), positions={})
+    ctx = StrategyContext(
+        event=MarketEvent(
+            type=MarketEventType.BAR, ts=_EPOCH, symbol="BTCUSDT", bar=bars[-1]
+        ),
+        now=_EPOCH, account=acct, instruments=_instruments(), market=market,
+    )
+    strat.on_event(ctx)
+    logs1 = strat.drain_scan_logs()
+    assert any(m["message"].startswith("checked BTCUSDT:") for m in logs1)
+
+    # A second evaluation with the SAME reason still logs (no dedup).
+    strat.on_event(ctx)
+    logs2 = strat.drain_scan_logs()
+    assert any(m["message"].startswith("checked BTCUSDT:") for m in logs2)
+
+
 def test_stop_advances_to_breakeven_then_trails():
     strat = create_strategy("guarded_ladder", _test_params())
     k = ("BTCUSDT", "long")

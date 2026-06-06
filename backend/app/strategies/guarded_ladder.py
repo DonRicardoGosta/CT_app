@@ -388,16 +388,29 @@ class GuardedLadderStrategy(Strategy):
         return logs
 
     def _queue_scan_log(self, symbol: str, reason: str, *, check: str, **context) -> None:
-        if symbol and self._last_scan_reason.get(symbol) == reason:
-            return
+        # Log the outcome on every evaluated candle (no dedup): with the scheduled
+        # poll this runs once per coin per closed candle, so it is the per-candle
+        # "I checked SYMBOL and here is why I did/did not trade" line the user wants.
         if symbol:
             self._last_scan_reason[symbol] = reason
-        message = f"scan {symbol}: {reason}" if symbol else reason
+        message = f"checked {symbol}: {reason}" if symbol else reason
         ctx = {"check": check, **context}
         if symbol:
             ctx["symbol"] = symbol
         self._pending_logs.append(
             {"message": message, "symbol": symbol or None, "severity": "info", "context": ctx}
+        )
+
+    def _log_decision(self, symbol: str, message: str, **context) -> None:
+        """Always-on per-candle decision line (entry/manage), never deduped."""
+        ctx = {"check": "decision", "symbol": symbol, **context}
+        self._pending_logs.append(
+            {
+                "message": f"checked {symbol}: {message}",
+                "symbol": symbol,
+                "severity": "info",
+                "context": ctx,
+            }
         )
 
     def _symbols_with_open_position(self, account: AccountState) -> set[str]:
@@ -549,6 +562,13 @@ class GuardedLadderStrategy(Strategy):
             intents.extend(self._manage_position(symbol, side, pos, price, closes))
 
         if intents:
+            for it in intents:
+                self._log_decision(
+                    symbol,
+                    f"{it.action.value} {it.position_side.value} ({it.reason})",
+                    action=it.action.value,
+                    tag=it.tag,
+                )
             return intents
 
         # No new entries once the capital guard has halted trading.
@@ -572,7 +592,15 @@ class GuardedLadderStrategy(Strategy):
             if entry is not None:
                 intents.append(entry)
 
-        if not intents:
+        if intents:
+            for it in intents:
+                self._log_decision(
+                    symbol,
+                    f"OPEN {it.position_side.value} {it.tag} ({it.reason})",
+                    action="open",
+                    tag=it.tag,
+                )
+        else:
             self._record_scan(symbol, context)
         return intents
 
@@ -795,6 +823,28 @@ class GuardedLadderStrategy(Strategy):
         if fast is None or slow is None or trend is None:
             self._queue_scan_log(symbol, "indicators not ready", check="indicators")
             return
+
+        # Already holding this symbol -> not seeking a new entry (TP/SL manage it).
+        for s in (PositionSide.LONG, PositionSide.SHORT):
+            held = context.account.position(symbol, s)
+            if held is not None and held.qty > 0:
+                self._queue_scan_log(
+                    symbol,
+                    f"in {s.value} position (step {held.step_count}/{self.p.max_entries}); "
+                    "holding, exchange TP/SL active",
+                    check="in_position",
+                    side=s.value,
+                )
+                return
+        if not self._slot_free(context.account):
+            open_syms = self._symbols_with_open_position(context.account)
+            self._queue_scan_log(
+                symbol,
+                f"no free slot ({len(open_syms)}/{self.p.max_symbols} positions open)",
+                check="slots_full",
+            )
+            return
+
         long_regime = price > trend and fast > slow
         short_regime = price < trend and fast < slow
         if not long_regime and not short_regime:
