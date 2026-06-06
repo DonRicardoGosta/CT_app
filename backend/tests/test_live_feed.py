@@ -58,6 +58,51 @@ class _FakeRest:
 
 
 @pytest.mark.asyncio
+async def test_warmup_logs_per_coin_fetch_and_result():
+    instruments = {sym: _instrument(sym) for sym in ["BTCUSDT", "ETHUSDT"]}
+    rest = _FakeRest(count=4)
+    logs: list[tuple[str, str]] = []
+
+    async def on_log(severity: str, message: str, context: dict) -> None:
+        logs.append((severity, message))
+
+    feed = LiveFeed(
+        ["BTCUSDT", "ETHUSDT"], instruments, "1m",
+        rest=rest, warmup_bars=4, on_log=on_log,
+    )
+    await feed._enqueue_warmup(["BTCUSDT", "ETHUSDT"])
+
+    msgs = [m for _s, m in logs]
+    # A "fetching" line BEFORE and a "got ... candles" line AFTER for each coin.
+    assert any("warmup BTCUSDT: fetching" in m for m in msgs)
+    assert any("warmup BTCUSDT: got 4 candles" in m for m in msgs)
+    assert any("warmup ETHUSDT: got 4 candles" in m for m in msgs)
+    assert any("warmup complete: 2/2" in m for m in msgs)
+
+
+class _EmptyRest:
+    async def get_recent_klines(self, symbol, interval, count):
+        return []
+
+
+@pytest.mark.asyncio
+async def test_warmup_logs_warning_when_no_history():
+    instruments = {"BTCUSDT": _instrument("BTCUSDT")}
+    logs: list[tuple[str, str]] = []
+
+    async def on_log(severity, message, context):
+        logs.append((severity, message))
+
+    feed = LiveFeed(
+        ["BTCUSDT"], instruments, "1m", rest=_EmptyRest(), warmup_bars=4, on_log=on_log
+    )
+    await feed._enqueue_warmup(["BTCUSDT"])
+
+    assert any(s == "warn" and "no history returned" in m for s, m in logs)
+    assert any("warmup complete: 0/1" in m for _s, m in logs)
+
+
+@pytest.mark.asyncio
 async def test_warmup_enqueues_history_as_warmup_bars():
     instruments = {"BTCUSDT": _instrument("BTCUSDT")}
     rest = _FakeRest(count=5)

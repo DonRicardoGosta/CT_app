@@ -202,12 +202,17 @@ async def build_engine(
         # this a long-history strategy (e.g. a 200-EMA trend filter) would idle
         # for hours building candles one by one before it could trade.
         warmup = strategy.warmup_bars() if config.symbols else 0
+
+        async def _feed_log(severity: str, message: str, context: dict) -> None:
+            await _emit_builder_log(sink, config, severity, message, context=context)
+
         feed = LiveFeed(
             feed_symbols,
             instruments,
             config.interval,
             rest=rest if warmup > 0 else None,
             warmup_bars=warmup,
+            on_log=_feed_log if warmup > 0 else None,
         )
         if mode is Mode.LIVE:
             broker = LiveBroker(rest)
