@@ -264,25 +264,21 @@ class Engine:
     ) -> None:
         summary.events += 1
 
-        # 1) update market state + broker mark
+        # 1) update market state
         if event.type is MarketEventType.BAR and event.bar is not None:
             self.market.update_bar(event.bar)
         else:
             self.market.update_price(event.symbol, event.price)
-        await self.broker.set_mark(event.symbol, event.price)
-        await self._emit_market(event)
-        if event.type is MarketEventType.BAR and event.bar is not None:
-            self._interval = event.bar.interval
-            await self._emit_candle(event.bar)
-            if event.bar.symbol in self._selected:
-                await self._emit_symbol_summary(event.bar.symbol)
 
-        # Warmup bars are preloaded HISTORY: they build the rolling market state
-        # (and the chart) so a long-history strategy can evaluate immediately, but
-        # we must never run decisions, place orders or manage stops on stale
-        # candles — especially in live mode. Skip the trading path for them.
+        # Warmup bars are preloaded HISTORY: they only build the rolling market
+        # state so a long-history strategy can evaluate immediately. We must not
+        # trade on them AND must not flood the event bus with thousands of stale
+        # market/candle events — doing so previously backed up the engine for
+        # minutes and delayed the first real evaluation. So: update state above,
+        # then return here without any emits or broker calls.
         if event.warmup:
             if event.bar is not None:
+                self._interval = event.bar.interval
                 self._warmup_counts[event.bar.symbol] = (
                     self._warmup_counts.get(event.bar.symbol, 0) + 1
                 )
@@ -296,6 +292,15 @@ class Engine:
                         context={"interval": self._interval},
                     )
             return
+
+        # 1b) live event: update broker mark + emit market/candle for the UI.
+        await self.broker.set_mark(event.symbol, event.price)
+        await self._emit_market(event)
+        if event.type is MarketEventType.BAR and event.bar is not None:
+            self._interval = event.bar.interval
+            await self._emit_candle(event.bar)
+            if event.bar.symbol in self._selected:
+                await self._emit_symbol_summary(event.bar.symbol)
 
         # First LIVE (non-warmup) bar for a symbol: announce it is now evaluating,
         # so the user sees the transition from warmup to live decisions per coin.
