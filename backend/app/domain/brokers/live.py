@@ -235,6 +235,49 @@ class LiveBroker(Broker):
             "error": None,
         }
 
+    async def modify_stop(
+        self,
+        *,
+        symbol: str,
+        position_side: PositionSide,
+        stop_price: Decimal,
+        instrument: Instrument,
+    ) -> bool:
+        """Relocate the position-level stop-loss on Bitunix (breakeven/trailing).
+
+        Only ever called by the engine for positions the bot itself opened, so a
+        user's manual trades are never touched.
+        """
+        position_id, pos_qty = await self._resolve_position(symbol, position_side)
+        if not position_id or pos_qty <= 0:
+            log.warning(
+                "modify_stop_no_position", symbol=symbol, side=position_side.value
+            )
+            return False
+        try:
+            await self._rest.modify_position_tpsl(
+                symbol=symbol,
+                position_id=position_id,
+                sl_price=str(stop_price),
+            )
+        except Exception as exc:  # noqa: BLE001 - surface, do not crash the loop
+            log.error(
+                "modify_stop_failed",
+                error=str(exc),
+                symbol=symbol,
+                side=position_side.value,
+                stop=str(stop_price),
+            )
+            return False
+        log.info(
+            "exchange_stop_modified",
+            symbol=symbol,
+            side=position_side.value,
+            position_id=position_id,
+            stop=str(stop_price),
+        )
+        return True
+
     async def _verify_tpsl(self, symbol: str, position_id: str) -> int:
         """Return how many TP/SL orders currently rest for the position."""
         try:

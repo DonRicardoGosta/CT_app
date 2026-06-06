@@ -60,6 +60,21 @@ log = get_logger(__name__)
 
 
 @dataclass(slots=True)
+class _ManagedPosition:
+    """Live bookkeeping for a position the engine itself opened.
+
+    Used to move the exchange stop (breakeven/trailing) after take-profit legs
+    fill, and to guarantee the engine never touches a position it did not open.
+    """
+
+    entry_price: Decimal
+    last_qty: Decimal
+    best_price: Decimal
+    tps_filled: int = 0
+    last_stop: Decimal | None = None
+
+
+@dataclass(slots=True)
 class EngineSummary:
     """Result of a run, handy for reporting and the equivalence test."""
 
@@ -114,6 +129,11 @@ class Engine:
         self._scanned_once = False
         self._symbols_with_open: set[str] = set()
         self._in_replacement_scan = False
+        # Registry of positions THIS engine opened, keyed by (symbol, side). It is
+        # the whitelist for live stop management / closing: the engine never
+        # modifies or closes a position that is not here (e.g. the user's manual
+        # trades on the same account). Tracks the moving-stop bookkeeping too.
+        self._managed: dict[tuple[str, PositionSide], _ManagedPosition] = {}
 
     def _strategy_context(
         self,
@@ -273,6 +293,8 @@ class Engine:
         # 5) refresh dynamic coin selection (may grow the watchlist)
         await self._refresh_selection(ctx)
         await self._flush_strategy_logs()
+        # 5b) live: move the exchange stop (breakeven/trailing) for OUR positions
+        await self._manage_live_protections(instruments)
         # 6) keep TP/SL overlays live for open positions on this symbol
         if event.type is MarketEventType.BAR and event.bar is not None:
             await self._emit_open_levels(event.bar.symbol)
@@ -348,6 +370,22 @@ class Engine:
                     if ctx is not None:
                         await self._refresh_selection(ctx)
                     continue
+            # Safety: in live mode never close/reduce a position this run did not
+            # open (e.g. the user's manual trades on the same account).
+            if (
+                self.mode is Mode.LIVE
+                and intent.action in (IntentAction.CLOSE, IntentAction.REDUCE)
+                and (intent.symbol, intent.position_side) not in self._managed
+            ):
+                summary.rejected += 1
+                await self._emit_log(
+                    "risk",
+                    "warn",
+                    f"refusing to {intent.action.value} {intent.symbol} "
+                    f"{intent.position_side.value}: not opened by this run",
+                    context={"symbol": intent.symbol, "tag": intent.tag},
+                )
+                continue
             result = self.sizer.size(intent, account, instrument, price)
             if not result.ok or result.request is None:
                 summary.rejected += 1
@@ -402,6 +440,8 @@ class Engine:
                     await self._emit_fill(fill)
                 await self._emit_positions_for(order.symbol)
                 entry = order.avg_fill_price or price
+                if self.mode is Mode.LIVE and intent.action is IntentAction.OPEN:
+                    await self._register_managed_open(order, entry)
                 tps, stops = self._levels(
                     order.symbol, order.position_side, entry, order.leverage
                 )
@@ -440,6 +480,114 @@ class Engine:
         return {
             pos.symbol for pos in account.positions.values() if pos.qty > 0
         }
+
+    async def _register_managed_open(self, order: Order, entry_price: Decimal) -> None:
+        """Record a position the engine just opened, for live stop management.
+
+        This is the whitelist used to ensure the engine only ever moves/closes
+        positions it opened itself — never the user's manual trades.
+        """
+        account = await self.broker.account()
+        pos = account.position(order.symbol, order.position_side)
+        qty = pos.qty if pos is not None and pos.qty > 0 else order.filled_qty
+        entry = (
+            pos.entry_price
+            if pos is not None and pos.entry_price > 0
+            else entry_price
+        )
+        key = (order.symbol, order.position_side)
+        existing = self._managed.get(key)
+        if existing is None:
+            self._managed[key] = _ManagedPosition(
+                entry_price=entry, last_qty=qty, best_price=entry
+            )
+        else:
+            # Additional (DCA) entry: track the new aggregate position.
+            existing.entry_price = entry
+            existing.last_qty = max(existing.last_qty, qty)
+            existing.best_price = entry
+
+    async def _manage_live_protections(
+        self, instruments: dict[str, Instrument]
+    ) -> None:
+        """Move the exchange stop (breakeven/trailing) for OUR open positions.
+
+        Live only. For each position the engine opened, detect take-profit fills
+        (the exchange qty dropping), track the best price, and ask the strategy
+        where the stop should sit; push the new stop to the exchange only when it
+        is strictly more favourable. Positions not in the registry (e.g. the
+        user's manual trades) are never touched.
+        """
+        if self.mode is not Mode.LIVE or not self._managed:
+            return
+        account = await self.broker.account()
+        for key in list(self._managed.keys()):
+            symbol, side = key
+            mp = self._managed[key]
+            pos = account.position(symbol, side)
+            if pos is None or pos.qty <= 0:
+                # Fully closed on the exchange — stop managing it.
+                self._managed.pop(key, None)
+                continue
+            mark = self.market.last_price(symbol) or pos.entry_price
+            mp.best_price = (
+                max(mp.best_price, mark)
+                if side is PositionSide.LONG
+                else min(mp.best_price, mark)
+            )
+            # A drop in position quantity means a take-profit leg filled.
+            if pos.qty < mp.last_qty:
+                mp.tps_filled += 1
+            mp.last_qty = pos.qty
+
+            new_stop = self.strategy.compute_live_stop(
+                side, mp.entry_price, mp.best_price, mp.tps_filled
+            )
+            if new_stop is None:
+                continue
+            new_stop = Decimal(str(new_stop))
+            if mp.last_stop is not None:
+                improved = (
+                    new_stop > mp.last_stop
+                    if side is PositionSide.LONG
+                    else new_stop < mp.last_stop
+                )
+                if not improved:
+                    continue
+            instrument = instruments.get(symbol)
+            if instrument is None:
+                continue
+            ok = await self.broker.modify_stop(
+                symbol=symbol,
+                position_side=side,
+                stop_price=new_stop,
+                instrument=instrument,
+            )
+            if not ok:
+                continue
+            mp.last_stop = new_stop
+            tps, _stops = self._levels(symbol, side, mp.entry_price, pos.leverage)
+            await self._emit_trade_level(
+                symbol=symbol,
+                position_side=side.value,
+                current_price=mark,
+                actual_entry=mp.entry_price,
+                take_profits=tps,
+                stops=[new_stop],
+                source="position",
+            )
+            await self._emit_log(
+                "broker",
+                "info",
+                f"moved stop for {symbol} {side.value} to {new_stop} "
+                f"(after {mp.tps_filled} TP fill(s))",
+                context={
+                    "symbol": symbol,
+                    "stop": str(new_stop),
+                    "tps_filled": mp.tps_filled,
+                    "best": str(mp.best_price),
+                },
+            )
 
     async def _handle_released_positions(
         self,

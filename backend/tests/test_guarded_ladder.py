@@ -266,6 +266,11 @@ def _ctx_with_losing_position(strat, *, baseline: Decimal, mark: Decimal) -> Mar
         balance=baseline,  # realized cash unchanged; the loss is unrealized
         positions={(symbol, PositionSide.LONG): pos},
     )
+    # Mark the position as one the strategy opened (so flatten will close it).
+    strat._last_entry[(symbol, "long")] = Decimal("100")
+    strat._stop[(symbol, "long")] = strat._initial_stop(Decimal("100"), PositionSide.LONG)
+    strat._best[(symbol, "long")] = Decimal("100")
+    strat._tps_hit[(symbol, "long")] = 0
     from app.strategies.base import StrategyContext
 
     event = MarketEvent(type=MarketEventType.BAR, ts=_EPOCH, symbol=symbol, bar=bar)
@@ -345,3 +350,135 @@ def test_no_halt_when_equity_above_threshold():
     )
     assert strat._check_capital_guard(ctx) == []
     assert strat._halted is False
+
+
+def test_flatten_ignores_manual_positions():
+    """The capital guard must never close a position the bot did not open."""
+    strat = create_strategy("guarded_ladder", _test_params())
+    manual = Position(
+        symbol="BTCUSDT",
+        position_side=PositionSide.LONG,
+        qty=Decimal("1"),
+        entry_price=Decimal("100"),
+        leverage=20,
+    )
+    acct = AccountState(
+        ts=_EPOCH, balance=Decimal("50"),
+        positions={("BTCUSDT", PositionSide.LONG): manual},
+    )
+    # No strategy trade-state for this symbol -> the bot did not open it.
+    assert strat._flatten_intents(acct) == []
+
+    # Once the bot has opened ETHUSDT, only that one is flattened.
+    strat._last_entry[("ETHUSDT", "long")] = Decimal("10")
+    strat._stop[("ETHUSDT", "long")] = Decimal("9")
+    acct.positions[("ETHUSDT", PositionSide.LONG)] = Position(
+        symbol="ETHUSDT", position_side=PositionSide.LONG, qty=Decimal("5"),
+        entry_price=Decimal("10"), leverage=20,
+    )
+    intents = strat._flatten_intents(acct)
+    assert [i.symbol for i in intents] == ["ETHUSDT"]
+
+
+# --------------------------------------------------------------------------- #
+# Live moving stop (compute_live_stop)
+# --------------------------------------------------------------------------- #
+def test_compute_live_stop_breakeven_then_trail():
+    # breakeven_after_tp=1, trail_after_tp=1, trail_pct=3.0 (defaults).
+    strat = create_strategy("guarded_ladder", {"trail_pct": "3.0"})
+    entry = Decimal("100")
+    # No TP filled yet -> do not move the resting entry stop.
+    assert strat.compute_live_stop(PositionSide.LONG, entry, entry, 0) is None
+    # After TP1, best barely above entry -> stop at breakeven (>= entry).
+    s1 = strat.compute_live_stop(PositionSide.LONG, entry, Decimal("100.5"), 1)
+    assert s1 == entry
+    # As best rises, the trail lifts the stop above entry.
+    s2 = strat.compute_live_stop(PositionSide.LONG, entry, Decimal("110"), 1)
+    assert s2 > entry and s2 == Decimal("110") * (Decimal(1) - Decimal("0.03"))
+    # Short mirrors: stop sits above entry and trails down.
+    ss = strat.compute_live_stop(PositionSide.SHORT, entry, Decimal("90"), 1)
+    assert ss == Decimal("90") * (Decimal(1) + Decimal("0.03"))
+
+
+# --------------------------------------------------------------------------- #
+# Engine live stop management: only touches positions the engine opened
+# --------------------------------------------------------------------------- #
+class _StopBroker:
+    """Minimal broker that records modify_stop calls and serves scripted accounts."""
+
+    def __init__(self, snapshots: list[AccountState]):
+        self._snapshots = snapshots
+        self._idx = 0
+        self.modify_calls: list[tuple[str, str, Decimal]] = []
+
+    async def account(self) -> AccountState:
+        snap = self._snapshots[min(self._idx, len(self._snapshots) - 1)]
+        return snap
+
+    async def set_mark(self, symbol: str, price: object) -> None:
+        return None
+
+    async def submit(self, request):  # pragma: no cover - not used here
+        raise NotImplementedError
+
+    async def modify_stop(self, *, symbol, position_side, stop_price, instrument) -> bool:
+        self.modify_calls.append((symbol, position_side.value, stop_price))
+        return True
+
+
+def _live_engine(strategy, broker):
+    from app.domain.clock import RealClock
+    from app.domain.feeds.live import LiveFeed
+
+    return Engine(
+        mode=Mode.LIVE,
+        strategy=strategy,
+        sizer=RiskSizer(RiskParams(base_leverage=20)),
+        broker=broker,
+        feed=LiveFeed([], _instruments(), "15m"),
+        clock=RealClock(),
+        sink=InMemorySink(),
+        interval="15m",
+    )
+
+
+def _pos(symbol, qty, entry):
+    return Position(
+        symbol=symbol, position_side=PositionSide.LONG, qty=Decimal(str(qty)),
+        entry_price=Decimal(str(entry)), leverage=20,
+    )
+
+
+@pytest.mark.asyncio
+async def test_engine_moves_stop_only_for_managed_positions():
+    strat = create_strategy("guarded_ladder", {"trail_pct": "3.0"})
+    # The account always holds a MANUAL BTC long plus our managed ETH long.
+    btc = _pos("BTCUSDT", 1, 100)
+    eth_after_tp1 = _pos("ETHUSDT", 1, 10)  # qty halved -> TP1 filled
+    snap = AccountState(
+        ts=_EPOCH, balance=Decimal("50"),
+        positions={
+            ("BTCUSDT", PositionSide.LONG): btc,
+            ("ETHUSDT", PositionSide.LONG): eth_after_tp1,
+        },
+    )
+    broker = _StopBroker([snap])
+    engine = _live_engine(strat, broker)
+    instruments = {**_instruments("BTCUSDT"), **_instruments("ETHUSDT")}
+
+    # Register ONLY the ETH position as opened by the engine.
+    from app.domain.engine import _ManagedPosition
+
+    engine._managed[("ETHUSDT", PositionSide.LONG)] = _ManagedPosition(
+        entry_price=Decimal("10"), last_qty=Decimal("2"), best_price=Decimal("10")
+    )
+    engine.market.update_price("ETHUSDT", Decimal("10.4"))
+    engine.market.update_price("BTCUSDT", Decimal("95"))
+
+    await engine._manage_live_protections(instruments)
+
+    # Exactly one modify_stop, for ETH (managed), never BTC (manual).
+    assert [c[0] for c in broker.modify_calls] == ["ETHUSDT"]
+    # TP1 detected (qty 2 -> 1) -> stop moved to at least breakeven (entry 10).
+    assert broker.modify_calls[0][2] >= Decimal("10")
+
