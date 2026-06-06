@@ -153,6 +153,27 @@ def test_position_levels_are_price_based():
     assert lv["stops"], "an initial stop level must be present"
 
 
+def test_protection_plan_uses_fill_entry_not_stale_stop():
+    """TP/SL must be derived from the entry price passed (the live fill price).
+
+    Regression: a stale scan-price stop previously left TP legs on the wrong side
+    of the market (Bitunix rejects 'TP price must be greater than last price').
+    """
+    strat = create_strategy(
+        "guarded_ladder", {"tp_levels_pct": "2,6", "tp_close_pct": "50,100", "stop_loss_pct": "2"}
+    )
+    # Simulate a stale stored stop from a lower scan price.
+    strat._stop[("ALLOUSDT", "long")] = Decimal("0.3185")
+    plan = strat.protection_plan(
+        "ALLOUSDT", PositionSide.LONG, Decimal("0.35"), Decimal("153"), _instrument("ALLOUSDT")
+    )
+    assert plan is not None
+    # Stop is -2% from the real fill (0.35), not the stale 0.3185.
+    assert plan.stop_price == Decimal("0.35") * Decimal("0.98")
+    # Every take-profit is ABOVE the fill price for a long.
+    assert all(leg.price > Decimal("0.35") for leg in plan.take_profits)
+
+
 def test_protection_plan_builds_multiple_tp_legs():
     strat = create_strategy(
         "guarded_ladder", {"tp_levels_pct": "1,2,3", "tp_close_pct": "30,30,100"}
@@ -481,4 +502,96 @@ async def test_engine_moves_stop_only_for_managed_positions():
     assert [c[0] for c in broker.modify_calls] == ["ETHUSDT"]
     # TP1 detected (qty 2 -> 1) -> stop moved to at least breakeven (entry 10).
     assert broker.modify_calls[0][2] >= Decimal("10")
+
+
+class _FillBroker:
+    """Live-like broker: fills an open ABOVE the decision price and records protections."""
+
+    def __init__(self, fill_price: Decimal):
+        self.fill_price = fill_price
+        self._opened: dict[tuple[str, str], Position] = {}
+        self.protection_calls: list = []
+        self.modify_calls: list = []
+        self._seq = 0
+
+    async def set_mark(self, symbol, price):
+        return None
+
+    async def account(self) -> AccountState:
+        positions = {
+            (s, PositionSide(side)): p for (s, side), p in self._opened.items()
+        }
+        return AccountState(ts=_EPOCH, balance=Decimal("50"), positions=positions)
+
+    async def submit(self, request):
+        from app.domain.types import Fill, Order, OrderStatus, OrderType
+
+        self._seq += 1
+        if not request.reduce_only:
+            self._opened[(request.symbol, request.position_side.value)] = Position(
+                symbol=request.symbol,
+                position_side=request.position_side,
+                qty=request.qty,
+                entry_price=self.fill_price,
+                leverage=request.leverage,
+            )
+        fill = Fill(
+            order_id=f"f{self._seq}", symbol=request.symbol, side=request.side,
+            position_side=request.position_side, qty=request.qty,
+            price=self.fill_price, fee=Decimal("0"), ts=_EPOCH,
+        )
+        return Order(
+            id=f"o{self._seq}", symbol=request.symbol, side=request.side,
+            order_type=OrderType.MARKET, position_side=request.position_side,
+            qty=request.qty, leverage=request.leverage, status=OrderStatus.FILLED,
+            ts=_EPOCH, filled_qty=request.qty, avg_fill_price=self.fill_price,
+            reduce_only=request.reduce_only, fills=[fill],
+            bundled_sl=True, bundled_protection_ok=True,
+        )
+
+    async def place_exchange_protections(self, *, symbol, position_side, plan,
+                                         instrument, skip_sl=False, take_profits=None):
+        legs = take_profits if take_profits is not None else plan.take_profits
+        self.protection_calls.append({"symbol": symbol, "stop": plan.stop_price, "tps": legs})
+        return {"position_id": "p1", "sl_placed": True, "tp_placed": len(legs),
+                "tp_expected": len(legs), "verified_count": len(legs), "error": None}
+
+    async def modify_stop(self, *, symbol, position_side, stop_price, instrument):
+        self.modify_calls.append((symbol, stop_price))
+        return True
+
+
+@pytest.mark.asyncio
+async def test_live_entry_places_tp_sl_from_fill_price_not_scan_price():
+    from app.domain.engine import EngineSummary
+    from app.domain.types import IntentAction as IA
+    from app.domain.types import Side, TradeIntent
+
+    scan_price = Decimal("0.325")
+    fill_price = Decimal("0.350")
+    broker = _FillBroker(fill_price)
+    strat = create_strategy(
+        "guarded_ladder",
+        {"tp_levels_pct": "2,6", "tp_close_pct": "50,100", "stop_loss_pct": "2"},
+    )
+    engine = _live_engine(strat, broker)
+    instruments = _instruments("ALLOUSDT")
+    # The engine sizes/plans off the (stale) decision price.
+    engine.market.update_price("ALLOUSDT", scan_price)
+
+    intent = TradeIntent(
+        symbol="ALLOUSDT", side=Side.BUY, action=IA.OPEN,
+        position_side=PositionSide.LONG, tag="entry_1",
+    )
+    summary = EngineSummary(run_id="t", mode="live", strategy="guarded_ladder")
+    await engine._process_intents([intent], instruments, summary, None)
+
+    assert broker.protection_calls, "exchange protections should be placed"
+    call = broker.protection_calls[-1]
+    # Every TP leg is ABOVE the actual fill price (would be below if computed off
+    # the stale scan price -> the exchange-reject bug).
+    assert call["tps"], "TP legs expected"
+    assert all(leg.price > fill_price for leg in call["tps"])
+    # The stop was reconciled to -2% of the fill price, not the stale scan price.
+    assert broker.modify_calls and broker.modify_calls[-1][1] == fill_price * Decimal("0.98")
 
