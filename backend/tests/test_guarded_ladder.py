@@ -595,3 +595,74 @@ async def test_live_entry_places_tp_sl_from_fill_price_not_scan_price():
     # The stop was reconciled to -2% of the fill price, not the stale scan price.
     assert broker.modify_calls and broker.modify_calls[-1][1] == fill_price * Decimal("0.98")
 
+
+# --------------------------------------------------------------------------- #
+# Warmup guard: history bars build state but never trade
+# --------------------------------------------------------------------------- #
+def _make_always_open_strategy():
+    """Strategy that always wants to open — to prove the warmup guard.
+
+    Subclasses the real base so all optional engine hooks exist with defaults.
+    """
+    from pydantic import BaseModel
+
+    from app.domain.types import IntentAction as IA
+    from app.domain.types import Side, TradeIntent
+    from app.strategies.base import Strategy
+
+    class _Params(BaseModel):
+        pass
+
+    class _AlwaysOpen(Strategy):
+        name = "always_open"
+        Params = _Params
+
+        def desired_symbols(self, instruments):
+            return list(instruments)
+
+        def on_event(self, context):
+            bar = context.event.bar
+            if bar is None:
+                return []
+            return [
+                TradeIntent(
+                    symbol=bar.symbol, side=Side.BUY, action=IA.OPEN,
+                    position_side=PositionSide.LONG, tag="entry_1",
+                )
+            ]
+
+    return _AlwaysOpen()
+
+
+def _bar(symbol: str, *, warmup: bool) -> MarketEvent:
+    b = _bars_from_prices(symbol, [100.0])[0]
+    return MarketEvent(
+        type=MarketEventType.BAR, ts=b.open_time, symbol=symbol, bar=b, warmup=warmup
+    )
+
+
+@pytest.mark.asyncio
+async def test_warmup_bars_build_state_but_do_not_trade():
+    from app.domain.engine import EngineSummary
+    from app.domain.feeds.live import LiveFeed
+
+    instruments = _instruments("BTCUSDT")
+    clock = SimulatedClock(_EPOCH)
+    broker = SimBroker(clock, instruments, Decimal("50"), fee_rate=Decimal("0.0006"))
+    engine = Engine(
+        mode=Mode.DRY_RUN, strategy=_make_always_open_strategy(),
+        sizer=RiskSizer(RiskParams(min_investment_usd=Decimal("5"), base_leverage=20)),
+        broker=broker, feed=LiveFeed([], instruments, "15m"), clock=clock,
+        sink=InMemorySink(), interval="15m",
+    )
+    summary = EngineSummary(run_id="t", mode="dry_run", strategy="always_open")
+
+    # A warmup bar updates market state but must NOT produce orders/signals.
+    await engine._handle_event(_bar("BTCUSDT", warmup=True), instruments, summary)
+    assert summary.orders == 0
+    assert engine.market.closes("BTCUSDT") == [Decimal("100")]  # state built
+
+    # A normal (non-warmup) bar runs the trading path -> the stub opens.
+    await engine._handle_event(_bar("BTCUSDT", warmup=False), instruments, summary)
+    assert summary.orders == 1
+

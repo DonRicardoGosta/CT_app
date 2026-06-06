@@ -195,7 +195,20 @@ async def build_engine(
         # The feed starts with only explicit symbols (usually none); the engine's
         # one-by-one scan subscribes the coins it selects. The REST client stays
         # open for the life of the run because the scan fetches history from it.
-        feed = LiveFeed(feed_symbols, instruments, config.interval)
+        #
+        # With explicit symbols there is no one-by-one prescan to preload history
+        # (see ``history`` below), so the feed itself must warm up: it preloads
+        # the strategy's required bars per symbol before live data flows. Without
+        # this a long-history strategy (e.g. a 200-EMA trend filter) would idle
+        # for hours building candles one by one before it could trade.
+        warmup = strategy.warmup_bars() if config.symbols else 0
+        feed = LiveFeed(
+            feed_symbols,
+            instruments,
+            config.interval,
+            rest=rest if warmup > 0 else None,
+            warmup_bars=warmup,
+        )
         if mode is Mode.LIVE:
             broker = LiveBroker(rest)
         else:  # DRY_RUN: simulated fills on live prices
