@@ -196,13 +196,18 @@ async def run_backtest(args: argparse.Namespace) -> int:
         reports[sym].bars = n
     total_trades = sum(r.trades for r in reports.values())
     total_wins = sum(r.wins for r in reports.values())
-    win_rate = (Decimal(total_wins) / Decimal(total_trades) * Decimal("100")) if total_trades else Decimal("0")
+    win_rate = (
+        Decimal(total_wins) / Decimal(total_trades) * Decimal("100")
+        if total_trades
+        else Decimal("0")
+    )
 
     print("\n" + "-" * 78)
     print("RESULT")
     print("-" * 78)
     print(f"  bars processed     : {summary.events}")
-    print(f"  orders / fills     : {summary.orders} / {summary.fills}  (rejected {summary.rejected})")
+    print(f"  orders / fills     : {summary.orders} / {summary.fills}  "
+          f"(rejected {summary.rejected})")
     print(f"  round-trip trades  : {total_trades}")
     print(f"  win rate           : {win_rate:.1f}%  ({total_wins}W / {total_trades - total_wins}L)")
     print(f"  gross PnL          : {gross:+.2f} USDT")
