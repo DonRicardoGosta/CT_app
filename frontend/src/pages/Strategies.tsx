@@ -39,6 +39,12 @@ const DEFAULT_RISK: RiskForm = {
   allow_hedge: true,
 };
 
+// Default symbols: the exact basket guarded_ladder was validated/backtested on
+// (top-volume majors + liquid mid-caps), so live/backtest match that validation.
+// Clear this field to fall back to auto-selection by 24h volume.
+const DEFAULT_SYMBOLS =
+  "BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT, BNBUSDT, DOGEUSDT, AAVEUSDT, TONUSDT, WLDUSDT, LINKUSDT";
+
 const ACTIVE_STATUSES = new Set(["starting", "started", "running"]);
 
 function riskFromConfig(r: Record<string, unknown> | undefined): RiskForm {
@@ -79,7 +85,7 @@ export default function Strategies() {
   const [strategy, setStrategy] = useState<string>("");
   const [params, setParams] = useState<FormValue>({});
   const [mode, setMode] = useState("dry_run");
-  const [symbols, setSymbols] = useState("");
+  const [symbols, setSymbols] = useState(DEFAULT_SYMBOLS);
   // Candle interval the strategy trades on. 15m is the recommended/validated
   // default — 1m whipsaws breakout strategies badly.
   const [interval, setInterval] = useState<Interval>("15m");
