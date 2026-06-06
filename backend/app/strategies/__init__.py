@@ -9,6 +9,7 @@ auto-generate their configuration form (JSON schema).
 from app.strategies import (
     autoscan_ladder,  # noqa: F401 - register strategy
     guarded_ladder,  # noqa: F401 - register strategy
+    scalp_momentum,  # noqa: F401 - register strategy
     trend_scanner,  # noqa: F401 - register strategy
 )
 from app.strategies.base import Strategy, StrategyContext
