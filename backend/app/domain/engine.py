@@ -467,6 +467,31 @@ class Engine:
                     if ctx is not None:
                         await self._refresh_selection(ctx)
                 if self.mode is Mode.LIVE and instrument is not None and entry_plan is not None:
+                    # Recompute TP/SL from the ACTUAL fill price. The scan/decision
+                    # price can be stale on fast movers, which otherwise places the
+                    # take-profits on the wrong side of the market (exchange reject)
+                    # and leaves the stop far too loose for the real entry.
+                    fill_plan = self.strategy.protection_plan(
+                        order.symbol,
+                        order.position_side,
+                        entry,
+                        order.filled_qty,
+                        instrument,
+                    )
+                    if fill_plan is not None:
+                        entry_plan = fill_plan
+                        # Move the bundled (pre-fill) stop to the fill-based level
+                        # before placing the TP legs (TPs are placed last so the
+                        # stop modification cannot disturb them).
+                        moved = await self.broker.modify_stop(
+                            symbol=order.symbol,
+                            position_side=order.position_side,
+                            stop_price=entry_plan.stop_price,
+                            instrument=instrument,
+                        )
+                        mp = self._managed.get((order.symbol, order.position_side))
+                        if moved and mp is not None:
+                            mp.last_stop = entry_plan.stop_price
                     prot_result = await self._place_entry_protections(
                         order=order,
                         plan=entry_plan,

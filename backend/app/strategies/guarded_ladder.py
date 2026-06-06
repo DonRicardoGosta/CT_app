@@ -474,7 +474,10 @@ class GuardedLadderStrategy(Strategy):
         qty = Decimal(str(position_qty))
         if qty <= 0:
             return None
-        stop = self._stop.get(_key(symbol, side)) or self._initial_stop(entry, side)
+        # Always derive the initial stop from the entry price passed here (the
+        # actual fill price in live), not a stored value — otherwise a stale
+        # scan-price stop would be placed far from the real entry.
+        stop = self._initial_stop(entry, side)
         remaining = qty
         legs: list[TakeProfitLeg] = []
         levels = self._tp_levels()

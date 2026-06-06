@@ -153,6 +153,27 @@ def test_position_levels_are_price_based():
     assert lv["stops"], "an initial stop level must be present"
 
 
+def test_protection_plan_uses_fill_entry_not_stale_stop():
+    """TP/SL must be derived from the entry price passed (the live fill price).
+
+    Regression: a stale scan-price stop previously left TP legs on the wrong side
+    of the market (Bitunix rejects 'TP price must be greater than last price').
+    """
+    strat = create_strategy(
+        "guarded_ladder", {"tp_levels_pct": "2,6", "tp_close_pct": "50,100", "stop_loss_pct": "2"}
+    )
+    # Simulate a stale stored stop from a lower scan price.
+    strat._stop[("ALLOUSDT", "long")] = Decimal("0.3185")
+    plan = strat.protection_plan(
+        "ALLOUSDT", PositionSide.LONG, Decimal("0.35"), Decimal("153"), _instrument("ALLOUSDT")
+    )
+    assert plan is not None
+    # Stop is -2% from the real fill (0.35), not the stale 0.3185.
+    assert plan.stop_price == Decimal("0.35") * Decimal("0.98")
+    # Every take-profit is ABOVE the fill price for a long.
+    assert all(leg.price > Decimal("0.35") for leg in plan.take_profits)
+
+
 def test_protection_plan_builds_multiple_tp_legs():
     strat = create_strategy(
         "guarded_ladder", {"tp_levels_pct": "1,2,3", "tp_close_pct": "30,30,100"}
