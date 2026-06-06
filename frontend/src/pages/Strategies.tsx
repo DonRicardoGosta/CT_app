@@ -45,6 +45,45 @@ const DEFAULT_RISK: RiskForm = {
 const DEFAULT_SYMBOLS =
   "BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT, BNBUSDT, DOGEUSDT, AAVEUSDT, TONUSDT, WLDUSDT, LINKUSDT";
 
+// Per-strategy launch presets (risk, interval, starting balance). Selecting a
+// strategy loads its preset so the form matches the configuration it was
+// validated with. Strategies without an entry here fall back to BASE_PRESET —
+// so e.g. guarded_ladder keeps the existing 50 USDT / 20x / 15m defaults.
+interface StrategyPreset {
+  risk: RiskForm;
+  interval: Interval;
+  capital: string;
+}
+
+const BASE_PRESET: StrategyPreset = {
+  risk: DEFAULT_RISK,
+  interval: "15m",
+  capital: "50",
+};
+
+// scalp_momentum: the exact configuration its real-data backtest used
+// (10-coin basket on 5m candles, 1000 USDT sim balance, 5 USDT margin per entry,
+// 10x leverage). These reproduce the ~+3.3% / ~70% win-rate backtest result.
+const STRATEGY_PRESETS: Record<string, StrategyPreset> = {
+  scalp_momentum: {
+    risk: {
+      min_investment_usd: "5",
+      max_capital_usd: "100",
+      max_loss_usd: "1000",
+      base_leverage: "10",
+      max_leverage: "20",
+      leverage_step: "1",
+      allow_hedge: false,
+    },
+    interval: "5m",
+    capital: "1000",
+  },
+};
+
+function presetFor(name: string): StrategyPreset {
+  return STRATEGY_PRESETS[name] ?? BASE_PRESET;
+}
+
 const ACTIVE_STATUSES = new Set(["starting", "started", "running"]);
 
 function riskFromConfig(r: Record<string, unknown> | undefined): RiskForm {
@@ -96,16 +135,25 @@ export default function Strategies() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [presetName, setPresetName] = useState("");
 
+  // Load a strategy's parameter defaults plus its launch preset (risk, interval,
+  // starting balance). Strategies without a preset get BASE_PRESET.
+  const applyStrategy = (name: string) => {
+    setStrategy(name);
+    setParams(defaultsFromSchema(schemas![name]));
+    const preset = presetFor(name);
+    setRisk(preset.risk);
+    setInterval(preset.interval);
+    setCapital(preset.capital);
+  };
+
   // Pick the recommended strategy (trend_scanner) + its defaults when schemas load.
   if (!strategy && names.length) {
     const first = names.includes("trend_scanner") ? "trend_scanner" : names[0];
-    setStrategy(first);
-    setParams(defaultsFromSchema(schemas![first]));
+    applyStrategy(first);
   }
 
   const onSelectStrategy = (name: string) => {
-    setStrategy(name);
-    setParams(defaultsFromSchema(schemas![name]));
+    applyStrategy(name);
   };
 
   async function launch() {
