@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 
 from app.core.logging import get_logger
@@ -46,6 +47,7 @@ class LiveFeed(MarketDataFeed):
         *,
         rest: BitunixRest | None = None,
         warmup_bars: int = 0,
+        on_log: Callable[[str, str, dict], Awaitable[None]] | None = None,
     ) -> None:
         self._symbols: list[str] = []
         self._symbol_set: set[str] = set()
@@ -53,6 +55,8 @@ class LiveFeed(MarketDataFeed):
         self._interval = interval
         self._rest = rest
         self._warmup_bars = warmup_bars
+        # Optional async sink for user-visible logs (warmup progress per coin).
+        self._on_log = on_log
         self._ws = BitunixWS(PUBLIC_URL)
         for sym in symbols:
             self._add_initial_symbol(sym)
@@ -108,19 +112,62 @@ class LiveFeed(MarketDataFeed):
             if event is not None:
                 await self._queue.put(event)
 
+    async def _log(self, severity: str, message: str, **context) -> None:
+        """Emit a user-visible log (if a sink was provided) plus structlog."""
+        if self._on_log is not None:
+            with contextlib.suppress(Exception):
+                await self._on_log(severity, message, context)
+        getattr(log, "warning" if severity in ("warn", "error") else "info")(
+            message.replace(" ", "_")[:48], **context
+        )
+
     async def _enqueue_warmup(self, symbols: list[str]) -> None:
-        """Fetch recent closed bars per symbol and queue them as warmup events."""
+        """Fetch recent closed bars per symbol and queue them as warmup events.
+
+        Each symbol is fetched one by one with a visible log BEFORE and AFTER the
+        request, so a slow or empty coin is obvious (the "fetching..." line shows
+        without a matching "got..." line) instead of the run silently stalling.
+        """
         if self._rest is None or self._warmup_bars <= 0:
             return
-        for symbol in symbols:
+        total = len(symbols)
+        await self._log(
+            "info",
+            f"warmup: fetching history for {total} coin(s), "
+            f"~{self._warmup_bars} {self._interval} candles each",
+            count=total,
+            warmup_bars=self._warmup_bars,
+            interval=self._interval,
+        )
+        ready = 0
+        t0 = time.monotonic()
+        for idx, symbol in enumerate(symbols, start=1):
+            await self._log(
+                "info",
+                f"warmup {symbol}: fetching history ({idx}/{total})",
+                symbol=symbol,
+            )
+            started = time.monotonic()
             try:
                 bars = await self._rest.get_recent_klines(
                     symbol, self._interval, self._warmup_bars
                 )
             except Exception as exc:  # noqa: BLE001 - skip symbols we can't warm
-                log.warning("warmup_klines_failed", symbol=symbol, error=str(exc))
+                await self._log(
+                    "warn",
+                    f"warmup {symbol}: history fetch FAILED: {exc}",
+                    symbol=symbol,
+                    error=str(exc),
+                )
                 continue
+            dt = time.monotonic() - started
             if not bars:
+                await self._log(
+                    "warn",
+                    f"warmup {symbol}: no history returned (skipping for now)",
+                    symbol=symbol,
+                    seconds=round(dt, 2),
+                )
                 continue
             # All but the last become history; the last is the in-progress candle
             # so the first live rollover emits it as the first real closed bar.
@@ -135,6 +182,23 @@ class LiveFeed(MarketDataFeed):
                     )
                 )
             self._in_progress[symbol] = bars[-1]
+            ready += 1
+            await self._log(
+                "info",
+                f"warmup {symbol}: got {len(bars)} candles in {dt:.1f}s "
+                f"({ready}/{total} ready)",
+                symbol=symbol,
+                candles=len(bars),
+                seconds=round(dt, 2),
+            )
+        await self._log(
+            "info",
+            f"warmup complete: {ready}/{total} coin(s) ready in "
+            f"{time.monotonic() - t0:.1f}s; waiting for the next closed "
+            f"{self._interval} candle to evaluate",
+            ready=ready,
+            total=total,
+        )
 
     def _to_event(self, msg: dict) -> MarketEvent | None:
         symbol = msg.get("symbol")
