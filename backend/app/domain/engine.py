@@ -272,6 +272,13 @@ class Engine:
             if event.bar.symbol in self._selected:
                 await self._emit_symbol_summary(event.bar.symbol)
 
+        # Warmup bars are preloaded HISTORY: they build the rolling market state
+        # (and the chart) so a long-history strategy can evaluate immediately, but
+        # we must never run decisions, place orders or manage stops on stale
+        # candles — especially in live mode. Skip the trading path for them.
+        if event.warmup:
+            return
+
         # 2) strategy decision (pure)
         account = await self.broker.account()
         ctx = self._strategy_context(
