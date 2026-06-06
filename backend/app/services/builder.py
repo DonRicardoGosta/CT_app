@@ -194,14 +194,14 @@ async def build_engine(
         clock = RealClock()
         # The feed starts with only explicit symbols (usually none); the engine's
         # one-by-one scan subscribes the coins it selects. The REST client stays
-        # open for the life of the run because the scan fetches history from it.
+        # open for the life of the run because both the scan and the live
+        # scheduled poll fetch history from it.
         #
-        # With explicit symbols there is no one-by-one prescan to preload history
-        # (see ``history`` below), so the feed itself must warm up: it preloads
-        # the strategy's required bars per symbol before live data flows. Without
-        # this a long-history strategy (e.g. a 200-EMA trend filter) would idle
-        # for hours building candles one by one before it could trade.
-        warmup = strategy.warmup_bars() if config.symbols else 0
+        # The live feed is a scheduled REST poller: every candle close +
+        # ``poll_offset_s`` it fetches exactly ``window_bars`` closed klines per
+        # symbol (the strategy's required history) and evaluates the latest one.
+        # No warmup phase — each cycle fetches what it needs right then.
+        window_bars = strategy.warmup_bars()
 
         async def _feed_log(severity: str, message: str, context: dict) -> None:
             await _emit_builder_log(sink, config, severity, message, context=context)
@@ -210,9 +210,10 @@ async def build_engine(
             feed_symbols,
             instruments,
             config.interval,
-            rest=rest if warmup > 0 else None,
-            warmup_bars=warmup,
-            on_log=_feed_log if warmup > 0 else None,
+            rest=rest,
+            window_bars=window_bars,
+            on_log=_feed_log,
+            poll_offset_s=config.poll_offset_s,
         )
         if mode is Mode.LIVE:
             broker = LiveBroker(rest)

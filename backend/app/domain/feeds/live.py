@@ -1,14 +1,14 @@
-"""Live market data feed backed by the Bitunix WebSocket (REQ-002/003).
+"""Live market data feed: a scheduled REST poller (REQ-002/003).
 
-Strategies act on *closed* bars, so this feed emits a BAR event when a candle
-rolls over (a kline push arrives with a newer open time than the one in progress)
-and a TICK event for every push in between (used for live mark-to-market). This
-keeps the live decision stream identical in shape to the backtest stream.
+The live path is a simple, fully-logged cron. There is **no warmup phase** and no
+WebSocket dependency: on every candle boundary plus a fixed offset (default 20s)
+the feed fetches exactly the window of closed klines each symbol needs *right
+then*, logs every step, and emits one BAR event per symbol carrying that window.
+The engine rebuilds the symbol's rolling state from the window and evaluates the
+latest closed candle, so each cycle is self-contained and easy to debug.
 
-Before live data flows, the feed preloads recent historical bars per symbol (when
-a REST client is supplied) and emits them as ``warmup`` BAR events. This lets a
-strategy that needs a long history (e.g. a 200-EMA trend filter) start evaluating
-immediately instead of idling for hours while candles accumulate one by one.
+This keeps the live decision stream identical in shape to the backtest stream
+(closed bars), while making the fetch-decide-act loop explicit in the logs.
 """
 
 from __future__ import annotations
@@ -21,19 +21,10 @@ from datetime import UTC, datetime
 
 from app.core.logging import get_logger
 from app.domain.interfaces import MarketDataFeed
-from app.domain.types import Bar, Instrument, MarketEvent, MarketEventType, Tick
-from app.exchange.bitunix.models import parse_kline
+from app.domain.types import Instrument, MarketEvent, MarketEventType
 from app.exchange.bitunix.rest import BitunixRest
-from app.exchange.bitunix.ws import PUBLIC_URL, BitunixWS
 
 log = get_logger(__name__)
-
-_INTERVAL_CHANNEL = {
-    "1m": "market_kline_1min",
-    "5m": "market_kline_5min",
-    "15m": "market_kline_15min",
-    "1h": "market_kline_60min",
-}
 
 _INTERVAL_SECONDS = {
     "1m": 60,
@@ -45,7 +36,7 @@ _INTERVAL_SECONDS = {
 
 
 class LiveFeed(MarketDataFeed):
-    """Streams live market events from Bitunix."""
+    """Streams live market events by polling Bitunix REST on a fixed schedule."""
 
     def __init__(
         self,
@@ -54,85 +45,65 @@ class LiveFeed(MarketDataFeed):
         interval: str = "1m",
         *,
         rest: BitunixRest | None = None,
-        warmup_bars: int = 0,
+        window_bars: int = 0,
         on_log: Callable[[str, str, dict], Awaitable[None]] | None = None,
-        poll_buffer_s: float = 4.0,
+        poll_offset_s: float = 20.0,
     ) -> None:
         self._symbols: list[str] = []
         self._symbol_set: set[str] = set()
         self._instruments = instruments
         self._interval = interval
         self._rest = rest
-        self._warmup_bars = warmup_bars
-        # Optional async sink for user-visible logs (warmup progress per coin).
+        # How many closed klines to fetch per symbol each cycle (the strategy's
+        # required history window). Fetched fresh every cycle — no warmup.
+        self._window_bars = max(int(window_bars), 1)
+        # Optional async sink for user-visible logs (per-cycle / per-coin steps).
         self._on_log = on_log
-        # Seconds to wait past a candle boundary before REST-polling its close.
-        self._poll_buffer_s = poll_buffer_s
-        self._ws = BitunixWS(PUBLIC_URL)
+        # Seconds to wait past a candle boundary before fetching its close.
+        self._poll_offset_s = poll_offset_s
         for sym in symbols:
-            self._add_initial_symbol(sym)
-        self._in_progress: dict[str, Bar] = {}
-        # Open time of the most recent CLOSED bar already delivered per symbol.
-        # Shared by the WS rollover path and the REST poll backstop so neither
-        # emits a bar the other already did (or one already in warmup history).
+            if sym not in self._symbol_set:
+                self._symbol_set.add(sym)
+                self._symbols.append(sym)
+        # Open time of the most recent CLOSED bar already delivered per symbol,
+        # so a cycle never re-evaluates a candle it has already emitted.
         self._last_emitted: dict[str, datetime] = {}
         self._queue: asyncio.Queue[MarketEvent] = asyncio.Queue()
-        self._pump_task: asyncio.Task | None = None
         self._poll_task: asyncio.Task | None = None
-
-    @property
-    def _channel(self) -> str:
-        return _INTERVAL_CHANNEL.get(self._interval, "market_kline_1min")
-
-    def _add_initial_symbol(self, symbol: str) -> None:
-        if symbol in self._symbol_set:
-            return
-        self._symbol_set.add(symbol)
-        self._symbols.append(symbol)
-        self._ws.add_subscription(self._channel, symbol)
 
     async def instruments(self) -> dict[str, Instrument]:
         return self._instruments
 
     async def ensure_symbols(self, symbols: list[str]) -> list[str]:
-        """Subscribe to newly opened scan-batch symbols and preload their history."""
+        """Register newly selected symbols for the scheduled poll."""
         added: list[str] = []
         for symbol in symbols:
             if symbol in self._symbol_set:
                 continue
             self._symbol_set.add(symbol)
             self._symbols.append(symbol)
-            if await self._ws.subscribe(self._channel, symbol):
-                added.append(symbol)
+            added.append(symbol)
         if added:
-            await self._enqueue_warmup(added)
+            await self._log(
+                "info",
+                f"now polling {len(added)} newly selected coin(s) on the "
+                f"{self._interval} schedule",
+                symbols=added,
+            )
         return added
 
     async def stream(self) -> AsyncIterator[MarketEvent]:
-        # Preload history for the initial batch before any live data flows.
-        await self._enqueue_warmup(list(self._symbols))
-        await self._ws.start()
-        self._pump_task = asyncio.create_task(self._pump_ws())
-        # Scheduled REST poll: guarantees a closed-bar event every interval even
-        # if the WebSocket is degraded, so the strategy is always evaluated on
-        # schedule (the "cron" trigger). The WS still provides intrabar ticks.
-        if self._rest is not None:
-            self._poll_task = asyncio.create_task(self._poll_closed_bars())
+        if self._rest is None:
+            raise RuntimeError("LiveFeed requires a REST client to poll klines")
+        self._poll_task = asyncio.create_task(self._scheduled_loop())
         try:
             while True:
                 yield await self._queue.get()
         finally:
-            for task in (self._pump_task, self._poll_task):
-                if task is not None:
-                    task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await task
-
-    async def _pump_ws(self) -> None:
-        async for msg in self._ws.messages():
-            event = self._to_event(msg)
-            if event is not None:
-                await self._queue.put(event)
+            if self._poll_task is not None:
+                self._poll_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._poll_task
 
     async def _log(self, severity: str, message: str, **context) -> None:
         """Emit a user-visible log (if a sink was provided) plus structlog."""
@@ -143,189 +114,108 @@ class LiveFeed(MarketDataFeed):
             message.replace(" ", "_")[:48], **context
         )
 
-    async def _enqueue_warmup(self, symbols: list[str]) -> None:
-        """Fetch recent closed bars per symbol and queue them as warmup events.
+    def _interval_seconds(self) -> int:
+        return _INTERVAL_SECONDS.get(self._interval, 60)
 
-        Each symbol is fetched one by one with a visible log BEFORE and AFTER the
-        request, so a slow or empty coin is obvious (the "fetching..." line shows
-        without a matching "got..." line) instead of the run silently stalling.
-        """
-        if self._rest is None or self._warmup_bars <= 0:
-            return
-        total = len(symbols)
-        await self._log(
-            "info",
-            f"warmup: fetching history for {total} coin(s), "
-            f"~{self._warmup_bars} {self._interval} candles each",
-            count=total,
-            warmup_bars=self._warmup_bars,
-            interval=self._interval,
-        )
-        ready = 0
-        t0 = time.monotonic()
-        for idx, symbol in enumerate(symbols, start=1):
-            await self._log(
-                "info",
-                f"warmup {symbol}: fetching history ({idx}/{total})",
-                symbol=symbol,
-            )
-            started = time.monotonic()
-            try:
-                bars = await self._rest.get_recent_klines(
-                    symbol, self._interval, self._warmup_bars
-                )
-            except Exception as exc:  # noqa: BLE001 - skip symbols we can't warm
-                await self._log(
-                    "warn",
-                    f"warmup {symbol}: history fetch FAILED: {exc}",
-                    symbol=symbol,
-                    error=str(exc),
-                )
-                continue
-            dt = time.monotonic() - started
-            if not bars:
-                await self._log(
-                    "warn",
-                    f"warmup {symbol}: no history returned (skipping for now)",
-                    symbol=symbol,
-                    seconds=round(dt, 2),
-                )
-                continue
-            # All but the last become history; the last is the in-progress candle
-            # so the first live rollover emits it as the first real closed bar.
-            for bar in bars[:-1]:
-                await self._queue.put(
-                    MarketEvent(
-                        type=MarketEventType.BAR,
-                        ts=bar.open_time,
-                        symbol=symbol,
-                        bar=bar,
-                        warmup=True,
-                    )
-                )
-            self._in_progress[symbol] = bars[-1]
-            # The last warmup bar is the newest closed bar the engine has seen;
-            # the poll/WS backstop only emits bars strictly newer than this.
-            if len(bars) >= 2:
-                self._last_emitted[symbol] = bars[-2].open_time
-            ready += 1
-            await self._log(
-                "info",
-                f"warmup {symbol}: got {len(bars)} candles in {dt:.1f}s "
-                f"({ready}/{total} ready)",
-                symbol=symbol,
-                candles=len(bars),
-                seconds=round(dt, 2),
-            )
-        await self._log(
-            "info",
-            f"warmup complete: {ready}/{total} coin(s) ready in "
-            f"{time.monotonic() - t0:.1f}s; waiting for the next closed "
-            f"{self._interval} candle to evaluate",
-            ready=ready,
-            total=total,
-        )
-
-    def _to_event(self, msg: dict) -> MarketEvent | None:
-        symbol = msg.get("symbol")
-        data = msg.get("data")
-        ch = msg.get("ch", "")
-        if not symbol or data is None or "kline" not in ch:
-            return None
-        item = data[0] if isinstance(data, list) and data else data
-        if not isinstance(item, dict):
-            return None
-        bar = parse_kline(symbol, self._interval, item)
-
-        prev = self._in_progress.get(symbol)
-        if prev is not None and bar.open_time > prev.open_time:
-            # The previous candle just closed -> emit it as a BAR event, unless
-            # the REST poll backstop already delivered it (shared dedup).
-            self._in_progress[symbol] = bar
-            last = self._last_emitted.get(symbol)
-            if last is not None and prev.open_time <= last:
-                return None
-            self._last_emitted[symbol] = prev.open_time
-            return MarketEvent(
-                type=MarketEventType.BAR,
-                ts=prev.open_time,
-                symbol=symbol,
-                bar=prev,
-            )
-        self._in_progress[symbol] = bar
-        # Still within the current candle: emit a TICK for live mark-to-market.
-        return MarketEvent(
-            type=MarketEventType.TICK,
-            ts=datetime.now(UTC),
-            symbol=symbol,
-            tick=Tick(symbol=symbol, price=bar.close, ts=datetime.now(UTC)),
-        )
-
-    async def _poll_closed_bars(self) -> None:
-        """Scheduled REST backstop: emit each newly closed candle per symbol.
-
-        Wakes a few seconds after every interval boundary, fetches the latest
-        closed candles via REST and enqueues any that are newer than what has
-        already been delivered (gap-filling, in order). This makes the strategy's
-        per-candle evaluation reliable even when the WebSocket is degraded — the
-        decision cadence becomes a timer rather than a push dependency.
-        """
-        if self._rest is None:
-            return
-        secs = _INTERVAL_SECONDS.get(self._interval, 60)
+    async def _scheduled_loop(self) -> None:
+        """Wake `poll_offset_s` after each candle boundary and fetch every coin."""
+        secs = self._interval_seconds()
         announced = False
         while True:
             now = time.time()
             next_boundary = (int(now // secs) + 1) * secs
-            await asyncio.sleep(max(0.0, next_boundary - now) + self._poll_buffer_s)
+            await asyncio.sleep(max(0.0, next_boundary - now) + self._poll_offset_s)
             if not announced:
                 announced = True
                 await self._log(
                     "info",
-                    f"scheduled {self._interval} poll active: will check each coin "
-                    "on every candle close (WS-independent)",
+                    f"scheduled {self._interval} poll active: every candle close "
+                    f"+{self._poll_offset_s:g}s, fetch each coin and evaluate",
                     interval=self._interval,
+                    offset_s=self._poll_offset_s,
                 )
-            for symbol in list(self._symbols):
-                try:
-                    bars = await self._rest.get_recent_klines(symbol, self._interval, 5)
-                except Exception as exc:  # noqa: BLE001 - one bad coin must not stop others
-                    await self._log(
-                        "warn",
-                        f"poll {symbol}: history fetch failed: {exc}",
-                        symbol=symbol,
-                    )
-                    continue
-                await self._emit_new_closed(symbol, bars, secs)
-
-    async def _emit_new_closed(
-        self, symbol: str, bars: list[Bar], secs: int
-    ) -> int:
-        """Enqueue fully-closed bars newer than the last delivered one (in order)."""
-        emitted = 0
-        now = time.time()
-        last = self._last_emitted.get(symbol)
-        for bar in sorted(bars, key=lambda b: b.open_time):
-            # Only candles whose interval has fully elapsed are "closed".
-            if bar.open_time.timestamp() + secs > now + 1:
-                continue
-            if last is not None and bar.open_time <= last:
-                continue
-            self._last_emitted[symbol] = bar.open_time
-            last = bar.open_time
-            # Keep the WS rollover baseline at/after this bar so it does not
-            # re-emit it; only a strictly newer push will roll over.
-            current = self._in_progress.get(symbol)
-            if current is None or bar.open_time >= current.open_time:
-                self._in_progress[symbol] = bar
-            await self._queue.put(
-                MarketEvent(
-                    type=MarketEventType.BAR,
-                    ts=bar.open_time,
-                    symbol=symbol,
-                    bar=bar,
-                    warmup=False,
-                )
+            close_dt = datetime.fromtimestamp(next_boundary, tz=UTC)
+            fired_dt = datetime.now(UTC)
+            symbols = list(self._symbols)
+            await self._log(
+                "info",
+                f"scheduled {self._interval} poll fired at "
+                f"{fired_dt:%H:%M:%S} UTC (+{self._poll_offset_s:g}s after close "
+                f"{close_dt:%H:%M}): fetching {len(symbols)} coin(s)",
+                interval=self._interval,
+                close_time=close_dt.isoformat(),
+                coins=len(symbols),
             )
-            emitted += 1
-        return emitted
+            for symbol in symbols:
+                await self._fetch_and_emit(symbol, secs)
+
+    async def _fetch_and_emit(self, symbol: str, secs: int) -> None:
+        """Fetch this symbol's window, log every step, and emit the latest close."""
+        if self._rest is None:
+            return
+        await self._log(
+            "info",
+            f"poll {symbol}: fetching last {self._window_bars} {self._interval} klines",
+            symbol=symbol,
+        )
+        try:
+            # Fetch one extra to cover the not-yet-closed in-progress candle.
+            bars = await self._rest.get_recent_klines(
+                symbol, self._interval, self._window_bars + 1
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad coin must not stop others
+            await self._log(
+                "warn",
+                f"poll {symbol}: history fetch failed: {exc}",
+                symbol=symbol,
+                error=str(exc),
+            )
+            return
+
+        now = time.time()
+        closed = [b for b in sorted(bars, key=lambda b: b.open_time)
+                  if b.open_time.timestamp() + secs <= now + 1]
+        closed = closed[-self._window_bars:]
+        if not closed:
+            await self._log(
+                "warn",
+                f"poll {symbol}: got {len(bars)} klines but no closed candle yet, skipping",
+                symbol=symbol,
+            )
+            return
+
+        latest = closed[-1]
+        await self._log(
+            "info",
+            f"poll {symbol}: got {len(closed)} closed klines, latest closed "
+            f"{latest.open_time:%Y-%m-%d %H:%M} close={latest.close}",
+            symbol=symbol,
+            candles=len(closed),
+            latest_open_time=latest.open_time.isoformat(),
+            close=str(latest.close),
+        )
+
+        last = self._last_emitted.get(symbol)
+        if last is not None and latest.open_time <= last:
+            await self._log(
+                "info",
+                f"poll {symbol}: no new closed candle since "
+                f"{last:%H:%M}, skipping evaluation",
+                symbol=symbol,
+            )
+            return
+        self._last_emitted[symbol] = latest.open_time
+        await self._log(
+            "info",
+            f"poll {symbol}: new closed candle {latest.open_time:%H:%M} -> evaluating",
+            symbol=symbol,
+        )
+        await self._queue.put(
+            MarketEvent(
+                type=MarketEventType.BAR,
+                ts=latest.open_time,
+                symbol=symbol,
+                bar=latest,
+                window=tuple(closed),
+            )
+        )

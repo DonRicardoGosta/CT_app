@@ -23,6 +23,18 @@ class MarketState:
         self._bars[bar.symbol].append(bar)
         self._last[bar.symbol] = bar.close
 
+    def set_bars(self, symbol: str, bars: list[Bar]) -> None:
+        """Replace a symbol's rolling history with a freshly fetched window.
+
+        Used by the live scheduled poller: each cycle fetches exactly the window
+        of klines the strategy needs and rebuilds state from it, so there is no
+        long-lived accumulation (and no startup warmup phase).
+        """
+        seq: deque[Bar] = deque(bars, maxlen=self._max)
+        self._bars[symbol] = seq
+        if seq:
+            self._last[symbol] = seq[-1].close
+
     def update_price(self, symbol: str, price: Decimal) -> None:
         self._last[symbol] = price
 

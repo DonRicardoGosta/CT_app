@@ -33,6 +33,11 @@ class RunConfig(BaseModel):
     interval: str = "15m"
     initial_capital: Decimal = Decimal("1000")
 
+    # Live/dry-run only: seconds after each candle close to run the scheduled
+    # REST poll that fetches every symbol and evaluates it (e.g. 20 -> fetch at
+    # :00:20/:15:20/:30:20/:45:20 for a 15m interval).
+    poll_offset_s: float = 20.0
+
     # Live/dry-run only: which stored API key to use (live order routing).
     api_key_id: int | None = None
 

@@ -131,7 +131,10 @@ class MarketEvent:
     symbol: str
     bar: Bar | None = None
     tick: Tick | None = None
-    warmup: bool = False
+    # Freshly fetched window of closed bars accompanying a BAR event. The live
+    # scheduled poller fills this so the engine can rebuild the symbol's rolling
+    # history from exactly what it fetched this cycle (no warmup phase).
+    window: tuple[Bar, ...] = ()
 
     @property
     def price(self) -> Decimal:
