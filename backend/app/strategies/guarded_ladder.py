@@ -111,9 +111,10 @@ class GuardedLadderParams(BaseModel):
     )
 
     # -- multiple entries (DCA ladder) -------------------------------------- #
-    # Backtests on real Bitunix data favour a small number of adds on pullbacks,
-    # which lower the average entry without over-committing the capped account.
-    max_entries: int = Field(default=2, ge=1, le=50, description="Max entries per coin/side.")
+    # Default to a single entry so live management keeps one clean stop to move
+    # (extra DCA adds layer multiple exchange SL/TP orders and caused the larger
+    # live losses). DCA is still available by raising this.
+    max_entries: int = Field(default=1, ge=1, le=50, description="Max entries per coin/side.")
     entry_spacing_pct: Decimal = Field(
         default=Decimal("0.8"),
         description="Adverse price move (percent) required before adding the next entry.",
@@ -123,14 +124,16 @@ class GuardedLadderParams(BaseModel):
     # Targets are price-move percentages (leverage independent). ROE shown in the
     # UI = price move x leverage. ``tp_close_pct`` closes that fraction of the
     # *remaining* position at each leg; the final leg always closes the rest.
-    # The default banks a partial profit at +2% and lets the runner trail (the
-    # +12% leg is a far backstop), which validated best across coins and 5m/15m.
+    # Bank half the position at +2%, then let the trailing stop (live and
+    # backtest) ride the runner; the +6% leg is just a reachable backstop. With
+    # the live breakeven/trailing stop now active, the runner is protected after
+    # TP1 instead of giving the gain back to the original stop.
     tp_levels_pct: str = Field(
-        default="2.0,12",
-        description="Comma-separated take-profit price-move percentages (e.g. '2.0,12').",
+        default="2.0,6.0",
+        description="Comma-separated take-profit price-move percentages (e.g. '2.0,6.0').",
     )
     tp_close_pct: str = Field(
-        default="40,100",
+        default="50,100",
         description="Comma-separated close percent of the remainder at each TP leg.",
     )
 
@@ -297,10 +300,27 @@ class GuardedLadderStrategy(Strategy):
             return []
         return self._flatten_intents(context.account)
 
+    def _opened_keys(self) -> set[tuple[str, str]]:
+        """(symbol, side) pairs the strategy itself opened and still tracks.
+
+        Per-trade state is only created on our own entries, so this set excludes
+        any position the user opened manually on the same account.
+        """
+        keys: set[tuple[str, str]] = set()
+        keys.update(self._last_entry)
+        keys.update(self._stop)
+        keys.update(self._best)
+        keys.update(self._tps_hit)
+        return keys
+
     def _flatten_intents(self, account: AccountState) -> list[TradeIntent]:
+        """Close ONLY positions the bot opened (never the user's manual trades)."""
         intents: list[TradeIntent] = []
-        for (symbol, side), pos in account.positions.items():
-            if pos.qty <= 0:
+        for symbol, side_str in sorted(self._opened_keys()):
+            side = PositionSide(side_str)
+            pos = account.position(symbol, side)
+            if pos is None or pos.qty <= 0:
+                self._reset_trade((symbol, side_str))
                 continue
             intents.append(
                 TradeIntent(
@@ -312,7 +332,7 @@ class GuardedLadderStrategy(Strategy):
                     tag="halt_flatten",
                 )
             )
-            self._reset_trade(_key(symbol, side))
+            self._reset_trade((symbol, side_str))
         return intents
 
     # ------------------------------------------------------------------ #
@@ -688,21 +708,57 @@ class GuardedLadderStrategy(Strategy):
         return intents
 
     # ------------------------------------------------------------------ #
-    def _advance_stop(
-        self, k: tuple[str, str], side: PositionSide, entry: Decimal, best: Decimal
-    ) -> None:
-        hits = self._tps_hit.get(k, 0)
-        stop = self._stop.get(k, self._initial_stop(entry, side))
+    def _stop_for(
+        self,
+        side: PositionSide,
+        entry: Decimal,
+        best: Decimal,
+        tps_hit: int,
+        current: Decimal | None = None,
+    ) -> Decimal:
+        """Pure moving-stop math: initial -> breakeven -> trailing.
 
-        if self.p.breakeven_after_tp and hits >= self.p.breakeven_after_tp:
+        ``current`` is the stop already in force (never loosened below it). This is
+        shared by the backtest stop manager and the live exchange stop mover so the
+        two agree on where the stop should sit.
+        """
+        stop = current if current is not None else self._initial_stop(entry, side)
+
+        if self.p.breakeven_after_tp and tps_hit >= self.p.breakeven_after_tp:
             stop = max(stop, entry) if side is PositionSide.LONG else min(stop, entry)
 
-        if self.p.trail_after_tp and hits >= self.p.trail_after_tp:
+        if self.p.trail_after_tp and tps_hit >= self.p.trail_after_tp:
             dist = best * (self.p.trail_pct / Decimal(100))
             trail = best - dist if side is PositionSide.LONG else best + dist
             stop = max(stop, trail) if side is PositionSide.LONG else min(stop, trail)
 
-        self._stop[k] = stop
+        return stop
+
+    def _advance_stop(
+        self, k: tuple[str, str], side: PositionSide, entry: Decimal, best: Decimal
+    ) -> None:
+        hits = self._tps_hit.get(k, 0)
+        self._stop[k] = self._stop_for(side, entry, best, hits, self._stop.get(k))
+
+    def compute_live_stop(
+        self,
+        side: object,
+        entry_price: object,
+        best_price: object,
+        tps_filled: int,
+    ) -> Decimal | None:
+        """Stop price the live exchange SL should sit at after ``tps_filled`` TPs.
+
+        Returns ``None`` until at least one TP leg has filled (before that the
+        initial entry stop already rests on the exchange and need not move).
+        """
+        if not isinstance(side, PositionSide):
+            return None
+        if tps_filled <= 0:
+            return None
+        entry = Decimal(str(entry_price))
+        best = Decimal(str(best_price))
+        return self._stop_for(side, entry, best, tps_filled, None)
 
     def _reset_trade(self, k: tuple[str, str]) -> None:
         self._tps_hit.pop(k, None)

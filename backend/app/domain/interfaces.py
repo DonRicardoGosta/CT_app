@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import abc
 from collections.abc import AsyncIterator
+from decimal import Decimal
 
 from app.domain.types import (
     AccountState,
@@ -81,3 +82,20 @@ class Broker(abc.ABC):
     ) -> dict | None:
         """After an entry fill, register TP/SL on the exchange (live broker only)."""
         return None
+
+    async def modify_stop(
+        self,
+        *,
+        symbol: str,
+        position_side: PositionSide,
+        stop_price: Decimal,
+        instrument: Instrument,
+    ) -> bool:
+        """Move the exchange stop-loss of an open position (live broker only).
+
+        Used to implement a breakeven/trailing stop after partial take-profits.
+        Returns ``True`` when the exchange accepted the modification. Simulated
+        brokers (dry-run/backtest) manage stops via strategy intents instead, so
+        this is a no-op for them.
+        """
+        return False

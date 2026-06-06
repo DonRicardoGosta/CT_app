@@ -101,6 +101,22 @@ class Strategy(abc.ABC):
         """Optional TP/SL ladder for exchange placement after entry (live only)."""
         return None
 
+    def compute_live_stop(
+        self,
+        side: object,
+        entry_price: object,
+        best_price: object,
+        tps_filled: int,
+    ) -> object | None:
+        """Optional moving stop price for live exchange management.
+
+        Given how many take-profit legs have filled and the best price reached,
+        return the stop price the exchange SL should be moved to (e.g. breakeven
+        then trailing), or ``None`` if the strategy does not move its live stop.
+        The engine only ever applies this to positions the bot itself opened.
+        """
+        return None
+
     def on_open_outcome(
         self,
         symbol: str,
