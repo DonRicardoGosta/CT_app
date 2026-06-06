@@ -33,12 +33,15 @@ class BitunixWS:
         *,
         api_key: str = "",
         secret_key: str = "",
-        ping_interval: float = 20.0,
+        heartbeat_interval: float = 15.0,
     ) -> None:
         self.url = url
         self.api_key = api_key
         self.secret_key = secret_key
-        self.ping_interval = ping_interval
+        # Bitunix closes connections that do not receive a periodic *application*
+        # ping from the client (the library's protocol ping is not honoured), so
+        # we send our own ``{"op":"ping"}`` every ``heartbeat_interval`` seconds.
+        self.heartbeat_interval = heartbeat_interval
         self._subscriptions: list[dict[str, str]] = []
         self._subscription_keys: set[tuple[str, str | None]] = set()
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -93,9 +96,9 @@ class BitunixWS:
         backoff = 1.0
         while not self._stopped:
             try:
-                async with websockets.connect(
-                    self.url, ping_interval=self.ping_interval
-                ) as ws:
+                # Disable the library's protocol-level keepalive (Bitunix ignores
+                # it and drops the socket); we run our own app-level heartbeat.
+                async with websockets.connect(self.url, ping_interval=None) as ws:
                     self._active_ws = ws
                     log.info("ws_connected", url=self.url)
                     backoff = 1.0
@@ -107,8 +110,14 @@ class BitunixWS:
                         url=self.url,
                         subscriptions=len(self._subscriptions),
                     )
-                    async for raw in ws:
-                        await self._handle_raw(raw, ws)
+                    hb = asyncio.create_task(self._heartbeat(ws))
+                    try:
+                        async for raw in ws:
+                            await self._handle_raw(raw, ws)
+                    finally:
+                        hb.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await hb
                     self._active_ws = None
             except asyncio.CancelledError:
                 self._active_ws = None
@@ -125,6 +134,20 @@ class BitunixWS:
                 )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)
+
+    async def _heartbeat(self, ws: Any) -> None:
+        """Send an application-level ping periodically to keep the socket alive.
+
+        Bitunix drops connections that go ``heartbeat`` seconds without a client
+        ping, which showed up as a regular ~75s ``ws_disconnected`` ("no close
+        frame received or sent") loop that stopped live candles from arriving.
+        """
+        while True:
+            await asyncio.sleep(self.heartbeat_interval)
+            try:
+                await ws.send(json.dumps({"op": "ping"}))
+            except Exception:  # noqa: BLE001 - the read loop handles reconnects
+                return
 
     async def _login(self, ws: Any) -> None:
         nonce = generate_nonce()

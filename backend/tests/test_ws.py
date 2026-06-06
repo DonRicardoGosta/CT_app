@@ -6,6 +6,7 @@ the server closed the socket every ~80s (a ws_disconnected reconnect loop).
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -19,6 +20,31 @@ class _FakeWS:
 
     async def send(self, data: str) -> None:
         self.sent.append(data)
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_sends_app_level_ping():
+    # Tiny interval so the heartbeat fires quickly under test.
+    ws = BitunixWS(heartbeat_interval=0.01)
+    fake = _FakeWS()
+    task = asyncio.create_task(ws._heartbeat(fake))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with __import__("contextlib").suppress(asyncio.CancelledError):
+        await task
+    assert fake.sent, "heartbeat should have sent at least one ping"
+    assert json.loads(fake.sent[0]) == {"op": "ping"}
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_stops_on_send_error():
+    class _BrokenWS:
+        async def send(self, data: str) -> None:
+            raise ConnectionError("closed")
+
+    ws = BitunixWS(heartbeat_interval=0.01)
+    # Must return (not raise) so the read loop can drive the reconnect.
+    await asyncio.wait_for(ws._heartbeat(_BrokenWS()), timeout=1.0)
 
 
 @pytest.mark.asyncio
