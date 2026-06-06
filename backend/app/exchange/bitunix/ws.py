@@ -102,15 +102,27 @@ class BitunixWS:
                     if self.api_key and self.secret_key:
                         await self._login(ws)
                     await self._subscribe(ws)
+                    log.info(
+                        "ws_subscribed",
+                        url=self.url,
+                        subscriptions=len(self._subscriptions),
+                    )
                     async for raw in ws:
-                        await self._handle_raw(raw)
+                        await self._handle_raw(raw, ws)
                     self._active_ws = None
             except asyncio.CancelledError:
                 self._active_ws = None
                 raise
             except Exception as exc:  # noqa: BLE001 - reconnect on any failure
                 self._active_ws = None
-                log.warning("ws_disconnected", url=self.url, error=str(exc))
+                # WARNING so it surfaces in the UI Logs panel; include the reason
+                # and the reconnect delay so a flaky link is visible, not silent.
+                log.warning(
+                    "ws_disconnected",
+                    url=self.url,
+                    error=str(exc) or exc.__class__.__name__,
+                    reconnect_in_s=backoff,
+                )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)
 
@@ -134,12 +146,26 @@ class BitunixWS:
             return
         await ws.send(json.dumps({"op": "subscribe", "args": self._subscriptions}))
 
-    async def _handle_raw(self, raw: str | bytes) -> None:
+    async def _handle_raw(self, raw: str | bytes, ws: Any | None = None) -> None:
         try:
             msg = json.loads(raw)
         except (ValueError, TypeError):
             return
-        # Respond to server pings to keep the connection alive.
-        if msg.get("op") == "ping" or msg.get("ping"):
+        # Bitunix sends application-level pings and CLOSES the connection if we do
+        # not pong back. Previously we just dropped the ping, which caused the
+        # ~80s reconnect loop (repeated ws_disconnected). Reply with a pong.
+        ping = msg.get("ping")
+        if ping is not None:
+            if ws is not None:
+                with contextlib.suppress(Exception):
+                    await ws.send(json.dumps({"pong": ping}))
+            return
+        if msg.get("op") == "ping":
+            if ws is not None:
+                with contextlib.suppress(Exception):
+                    await ws.send(json.dumps({"op": "pong"}))
+            return
+        # Ignore the server's pong replies to our own keepalives.
+        if msg.get("op") == "pong" or msg.get("pong") is not None:
             return
         await self._queue.put(msg)

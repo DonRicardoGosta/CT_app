@@ -666,3 +666,8 @@ async def test_warmup_bars_build_state_but_do_not_trade():
     await engine._handle_event(_bar("BTCUSDT", warmup=False), instruments, summary)
     assert summary.orders == 1
 
+    # Observability: a warmup announce + a per-coin "now evaluating" line surfaced.
+    msgs = [e.message for e in engine.sink.errors]
+    assert any("preloading historical candles" in m for m in msgs)
+    assert any("live candle received, now evaluating" in m for m in msgs)
+

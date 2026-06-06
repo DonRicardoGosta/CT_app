@@ -134,6 +134,11 @@ class Engine:
         # modifies or closes a position that is not here (e.g. the user's manual
         # trades on the same account). Tracks the moving-stop bookkeeping too.
         self._managed: dict[tuple[str, PositionSide], _ManagedPosition] = {}
+        # Warmup / live-readiness observability so the UI shows what is happening
+        # during the (otherwise silent) history preload and first-candle wait.
+        self._warmup_counts: dict[str, int] = {}
+        self._warmup_announced = False
+        self._live_ready: set[str] = set()
 
     def _strategy_context(
         self,
@@ -277,7 +282,39 @@ class Engine:
         # we must never run decisions, place orders or manage stops on stale
         # candles — especially in live mode. Skip the trading path for them.
         if event.warmup:
+            if event.bar is not None:
+                self._warmup_counts[event.bar.symbol] = (
+                    self._warmup_counts.get(event.bar.symbol, 0) + 1
+                )
+                if not self._warmup_announced:
+                    self._warmup_announced = True
+                    await self._emit_log(
+                        "engine",
+                        "info",
+                        "preloading historical candles (warmup) so the strategy "
+                        "can evaluate immediately — no trades placed on history",
+                        context={"interval": self._interval},
+                    )
             return
+
+        # First LIVE (non-warmup) bar for a symbol: announce it is now evaluating,
+        # so the user sees the transition from warmup to live decisions per coin.
+        if (
+            event.type is MarketEventType.BAR
+            and event.bar is not None
+            and event.bar.symbol not in self._live_ready
+        ):
+            sym = event.bar.symbol
+            self._live_ready.add(sym)
+            have = len(self.market.closes(sym))
+            need = int(getattr(self.strategy, "warmup_bars", lambda: 0)() or 0)
+            await self._emit_log(
+                "engine",
+                "info",
+                f"{sym}: live candle received, now evaluating "
+                f"({have} bars of history{f', need ~{need}' if need else ''})",
+                context={"symbol": sym, "history_bars": have, "need": need},
+            )
 
         # 2) strategy decision (pure)
         account = await self.broker.account()
