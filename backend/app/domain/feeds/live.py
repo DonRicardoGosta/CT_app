@@ -35,6 +35,14 @@ _INTERVAL_CHANNEL = {
     "1h": "market_kline_60min",
 }
 
+_INTERVAL_SECONDS = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+}
+
 
 class LiveFeed(MarketDataFeed):
     """Streams live market events from Bitunix."""
@@ -48,6 +56,7 @@ class LiveFeed(MarketDataFeed):
         rest: BitunixRest | None = None,
         warmup_bars: int = 0,
         on_log: Callable[[str, str, dict], Awaitable[None]] | None = None,
+        poll_buffer_s: float = 4.0,
     ) -> None:
         self._symbols: list[str] = []
         self._symbol_set: set[str] = set()
@@ -57,12 +66,19 @@ class LiveFeed(MarketDataFeed):
         self._warmup_bars = warmup_bars
         # Optional async sink for user-visible logs (warmup progress per coin).
         self._on_log = on_log
+        # Seconds to wait past a candle boundary before REST-polling its close.
+        self._poll_buffer_s = poll_buffer_s
         self._ws = BitunixWS(PUBLIC_URL)
         for sym in symbols:
             self._add_initial_symbol(sym)
         self._in_progress: dict[str, Bar] = {}
+        # Open time of the most recent CLOSED bar already delivered per symbol.
+        # Shared by the WS rollover path and the REST poll backstop so neither
+        # emits a bar the other already did (or one already in warmup history).
+        self._last_emitted: dict[str, datetime] = {}
         self._queue: asyncio.Queue[MarketEvent] = asyncio.Queue()
         self._pump_task: asyncio.Task | None = None
+        self._poll_task: asyncio.Task | None = None
 
     @property
     def _channel(self) -> str:
@@ -97,14 +113,20 @@ class LiveFeed(MarketDataFeed):
         await self._enqueue_warmup(list(self._symbols))
         await self._ws.start()
         self._pump_task = asyncio.create_task(self._pump_ws())
+        # Scheduled REST poll: guarantees a closed-bar event every interval even
+        # if the WebSocket is degraded, so the strategy is always evaluated on
+        # schedule (the "cron" trigger). The WS still provides intrabar ticks.
+        if self._rest is not None:
+            self._poll_task = asyncio.create_task(self._poll_closed_bars())
         try:
             while True:
                 yield await self._queue.get()
         finally:
-            if self._pump_task is not None:
-                self._pump_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self._pump_task
+            for task in (self._pump_task, self._poll_task):
+                if task is not None:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
 
     async def _pump_ws(self) -> None:
         async for msg in self._ws.messages():
@@ -182,6 +204,10 @@ class LiveFeed(MarketDataFeed):
                     )
                 )
             self._in_progress[symbol] = bars[-1]
+            # The last warmup bar is the newest closed bar the engine has seen;
+            # the poll/WS backstop only emits bars strictly newer than this.
+            if len(bars) >= 2:
+                self._last_emitted[symbol] = bars[-2].open_time
             ready += 1
             await self._log(
                 "info",
@@ -213,8 +239,13 @@ class LiveFeed(MarketDataFeed):
 
         prev = self._in_progress.get(symbol)
         if prev is not None and bar.open_time > prev.open_time:
-            # The previous candle just closed -> emit it as a BAR event.
+            # The previous candle just closed -> emit it as a BAR event, unless
+            # the REST poll backstop already delivered it (shared dedup).
             self._in_progress[symbol] = bar
+            last = self._last_emitted.get(symbol)
+            if last is not None and prev.open_time <= last:
+                return None
+            self._last_emitted[symbol] = prev.open_time
             return MarketEvent(
                 type=MarketEventType.BAR,
                 ts=prev.open_time,
@@ -229,3 +260,72 @@ class LiveFeed(MarketDataFeed):
             symbol=symbol,
             tick=Tick(symbol=symbol, price=bar.close, ts=datetime.now(UTC)),
         )
+
+    async def _poll_closed_bars(self) -> None:
+        """Scheduled REST backstop: emit each newly closed candle per symbol.
+
+        Wakes a few seconds after every interval boundary, fetches the latest
+        closed candles via REST and enqueues any that are newer than what has
+        already been delivered (gap-filling, in order). This makes the strategy's
+        per-candle evaluation reliable even when the WebSocket is degraded — the
+        decision cadence becomes a timer rather than a push dependency.
+        """
+        if self._rest is None:
+            return
+        secs = _INTERVAL_SECONDS.get(self._interval, 60)
+        announced = False
+        while True:
+            now = time.time()
+            next_boundary = (int(now // secs) + 1) * secs
+            await asyncio.sleep(max(0.0, next_boundary - now) + self._poll_buffer_s)
+            if not announced:
+                announced = True
+                await self._log(
+                    "info",
+                    f"scheduled {self._interval} poll active: will check each coin "
+                    "on every candle close (WS-independent)",
+                    interval=self._interval,
+                )
+            for symbol in list(self._symbols):
+                try:
+                    bars = await self._rest.get_recent_klines(symbol, self._interval, 5)
+                except Exception as exc:  # noqa: BLE001 - one bad coin must not stop others
+                    await self._log(
+                        "warn",
+                        f"poll {symbol}: history fetch failed: {exc}",
+                        symbol=symbol,
+                    )
+                    continue
+                await self._emit_new_closed(symbol, bars, secs)
+
+    async def _emit_new_closed(
+        self, symbol: str, bars: list[Bar], secs: int
+    ) -> int:
+        """Enqueue fully-closed bars newer than the last delivered one (in order)."""
+        emitted = 0
+        now = time.time()
+        last = self._last_emitted.get(symbol)
+        for bar in sorted(bars, key=lambda b: b.open_time):
+            # Only candles whose interval has fully elapsed are "closed".
+            if bar.open_time.timestamp() + secs > now + 1:
+                continue
+            if last is not None and bar.open_time <= last:
+                continue
+            self._last_emitted[symbol] = bar.open_time
+            last = bar.open_time
+            # Keep the WS rollover baseline at/after this bar so it does not
+            # re-emit it; only a strictly newer push will roll over.
+            current = self._in_progress.get(symbol)
+            if current is None or bar.open_time >= current.open_time:
+                self._in_progress[symbol] = bar
+            await self._queue.put(
+                MarketEvent(
+                    type=MarketEventType.BAR,
+                    ts=bar.open_time,
+                    symbol=symbol,
+                    bar=bar,
+                    warmup=False,
+                )
+            )
+            emitted += 1
+        return emitted

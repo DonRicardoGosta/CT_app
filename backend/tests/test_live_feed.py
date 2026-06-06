@@ -1,3 +1,4 @@
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -5,6 +6,22 @@ import pytest
 
 from app.domain.feeds.live import LiveFeed
 from app.domain.types import Bar, Instrument, MarketEventType
+
+
+def _closed_bars(symbol: str, opens: list[float], secs: int) -> list[Bar]:
+    """Build closed candles whose open_time is `opens` seconds before now."""
+    now = time.time()
+    out = []
+    for off in opens:
+        ot = datetime.fromtimestamp(now - off, tz=UTC)
+        out.append(
+            Bar(
+                symbol=symbol, interval="15m", open_time=ot,
+                open=Decimal("1"), high=Decimal("1"), low=Decimal("1"),
+                close=Decimal("1"), volume=Decimal("1"),
+            )
+        )
+    return out
 
 
 def _instrument(symbol: str) -> Instrument:
@@ -119,6 +136,50 @@ async def test_warmup_enqueues_history_as_warmup_bars():
     # The last historical bar is held as the in-progress candle.
     assert feed._in_progress["BTCUSDT"].open_time == events[-1].bar.open_time + timedelta(minutes=1)
     assert rest.calls == ["BTCUSDT"]
+
+
+@pytest.mark.asyncio
+async def test_poll_emits_only_newly_closed_bars_in_order():
+    instruments = {"BTCUSDT": _instrument("BTCUSDT")}
+    feed = LiveFeed(["BTCUSDT"], instruments, "15m")
+    secs = 900
+    # Three closed candles (well in the past) + one not-yet-closed (too recent).
+    bars = _closed_bars("BTCUSDT", [3000, 2000, 1000, 100], secs)
+    not_closed = bars[-1]  # opened 100s ago -> 15m not elapsed
+
+    n = await feed._emit_new_closed("BTCUSDT", bars, secs)
+    assert n == 3  # the 3 fully-closed ones, not the in-progress candle
+    emitted = [feed._queue.get_nowait() for _ in range(3)]
+    # Delivered in chronological order, as non-warmup BAR events.
+    assert all(e.type is MarketEventType.BAR and not e.warmup for e in emitted)
+    assert [e.bar.open_time for e in emitted] == [b.open_time for b in bars[:3]]
+    # Re-polling the same data emits nothing new (dedup via _last_emitted).
+    assert await feed._emit_new_closed("BTCUSDT", bars, secs) == 0
+    assert feed._queue.empty()
+    assert not_closed.open_time > feed._last_emitted["BTCUSDT"]
+
+
+@pytest.mark.asyncio
+async def test_ws_does_not_re_emit_a_bar_the_poll_delivered():
+    instruments = {"BTCUSDT": _instrument("BTCUSDT")}
+    feed = LiveFeed(["BTCUSDT"], instruments, "15m")
+    secs = 900
+    bars = _closed_bars("BTCUSDT", [2000, 1000], secs)
+    await feed._emit_new_closed("BTCUSDT", bars, secs)
+    while not feed._queue.empty():
+        feed._queue.get_nowait()
+    last = feed._last_emitted["BTCUSDT"]
+
+    # A WS push for the next (in-progress) candle: prev == the bar the poll
+    # already emitted, so the WS path must NOT re-emit it (returns a TICK/None).
+    newer_open = int(last.timestamp() + secs) * 1000
+    msg = {
+        "ch": "market_kline_15min",
+        "symbol": "BTCUSDT",
+        "data": {"o": "1", "h": "1", "l": "1", "c": "1", "b": "0", "t": newer_open},
+    }
+    event = feed._to_event(msg)
+    assert event is None or event.type is MarketEventType.TICK
 
 
 @pytest.mark.asyncio
