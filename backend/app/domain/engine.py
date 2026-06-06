@@ -134,10 +134,8 @@ class Engine:
         # modifies or closes a position that is not here (e.g. the user's manual
         # trades on the same account). Tracks the moving-stop bookkeeping too.
         self._managed: dict[tuple[str, PositionSide], _ManagedPosition] = {}
-        # Warmup / live-readiness observability so the UI shows what is happening
-        # during the (otherwise silent) history preload and first-candle wait.
-        self._warmup_counts: dict[str, int] = {}
-        self._warmup_announced = False
+        # Live-readiness observability so the UI shows each coin's first
+        # evaluation (logged once per symbol).
         self._live_ready: set[str] = set()
 
     def _strategy_context(
@@ -264,34 +262,17 @@ class Engine:
     ) -> None:
         summary.events += 1
 
-        # 1) update market state
+        # 1) update market state. A windowed BAR event (the live scheduled poll)
+        # carries the freshly fetched history, so rebuild the symbol's rolling
+        # state from exactly what was fetched this cycle — no warmup, no stale
+        # accumulation. Other feeds (backtest) append a single bar as before.
         if event.type is MarketEventType.BAR and event.bar is not None:
-            self.market.update_bar(event.bar)
+            if event.window:
+                self.market.set_bars(event.symbol, list(event.window))
+            else:
+                self.market.update_bar(event.bar)
         else:
             self.market.update_price(event.symbol, event.price)
-
-        # Warmup bars are preloaded HISTORY: they only build the rolling market
-        # state so a long-history strategy can evaluate immediately. We must not
-        # trade on them AND must not flood the event bus with thousands of stale
-        # market/candle events — doing so previously backed up the engine for
-        # minutes and delayed the first real evaluation. So: update state above,
-        # then return here without any emits or broker calls.
-        if event.warmup:
-            if event.bar is not None:
-                self._interval = event.bar.interval
-                self._warmup_counts[event.bar.symbol] = (
-                    self._warmup_counts.get(event.bar.symbol, 0) + 1
-                )
-                if not self._warmup_announced:
-                    self._warmup_announced = True
-                    await self._emit_log(
-                        "engine",
-                        "info",
-                        "preloading historical candles (warmup) so the strategy "
-                        "can evaluate immediately — no trades placed on history",
-                        context={"interval": self._interval},
-                    )
-            return
 
         # 1b) live event: update broker mark + emit market/candle for the UI.
         await self.broker.set_mark(event.symbol, event.price)
@@ -302,8 +283,8 @@ class Engine:
             if event.bar.symbol in self._selected:
                 await self._emit_symbol_summary(event.bar.symbol)
 
-        # First LIVE (non-warmup) bar for a symbol: announce it is now evaluating,
-        # so the user sees the transition from warmup to live decisions per coin.
+        # First bar for a symbol: announce it is now evaluating, so the user sees
+        # each coin transition into live decisions.
         if (
             event.type is MarketEventType.BAR
             and event.bar is not None

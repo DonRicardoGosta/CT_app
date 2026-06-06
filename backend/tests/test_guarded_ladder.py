@@ -663,15 +663,21 @@ def _make_always_open_strategy():
     return _AlwaysOpen()
 
 
-def _bar(symbol: str, *, warmup: bool) -> MarketEvent:
-    b = _bars_from_prices(symbol, [100.0])[0]
+def _bar(symbol: str, *, window: list[float] | None = None) -> MarketEvent:
+    prices = window if window is not None else [100.0]
+    bars = _bars_from_prices(symbol, prices)
+    latest = bars[-1]
     return MarketEvent(
-        type=MarketEventType.BAR, ts=b.open_time, symbol=symbol, bar=b, warmup=warmup
+        type=MarketEventType.BAR,
+        ts=latest.open_time,
+        symbol=symbol,
+        bar=latest,
+        window=tuple(bars),
     )
 
 
 @pytest.mark.asyncio
-async def test_warmup_bars_build_state_but_do_not_trade():
+async def test_windowed_bar_rebuilds_state_and_trades():
     from app.domain.engine import EngineSummary
     from app.domain.feeds.live import LiveFeed
 
@@ -686,17 +692,18 @@ async def test_warmup_bars_build_state_but_do_not_trade():
     )
     summary = EngineSummary(run_id="t", mode="dry_run", strategy="always_open")
 
-    # A warmup bar updates market state but must NOT produce orders/signals.
-    await engine._handle_event(_bar("BTCUSDT", warmup=True), instruments, summary)
-    assert summary.orders == 0
-    assert engine.market.closes("BTCUSDT") == [Decimal("100")]  # state built
-
-    # A normal (non-warmup) bar runs the trading path -> the stub opens.
-    await engine._handle_event(_bar("BTCUSDT", warmup=False), instruments, summary)
+    # A windowed BAR event rebuilds the symbol's history from the fetched window
+    # (no warmup phase) and runs the trading path -> the stub opens.
+    await engine._handle_event(
+        _bar("BTCUSDT", window=[100.0, 101.0, 102.0]), instruments, summary
+    )
     assert summary.orders == 1
+    # State reflects exactly the fetched window, not single-bar accumulation.
+    assert engine.market.closes("BTCUSDT") == [
+        Decimal("100"), Decimal("101"), Decimal("102")
+    ]
 
-    # Observability: a warmup announce + a per-coin "now evaluating" line surfaced.
+    # Observability: a per-coin "now evaluating" line surfaced.
     msgs = [e.message for e in engine.sink.errors]
-    assert any("preloading historical candles" in m for m in msgs)
     assert any("live candle received, now evaluating" in m for m in msgs)
 
